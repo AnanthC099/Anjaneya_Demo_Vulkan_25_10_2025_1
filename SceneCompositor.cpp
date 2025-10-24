@@ -14,6 +14,8 @@
 //to distinguish the platfrom, below macro is needed
 #define VK_USE_PLATFORM_WIN32_KHR
 #include <vulkan/vulkan.h>
+#include <vulkan/vulkan_win32.h>
+#include <vulkan/vulkan_core.h>
 
 //glm related macros and header files
 #define GLM_FORCE_RADIANS
@@ -221,6 +223,7 @@ typedef struct GlobalContext_SceneCompositor
     VkImageView textureImageView;
     VkSampler textureSampler;
     PFN_vkCreateDebugReportCallbackEXT createDebugReportCallback;
+    PFN_vkCreateWin32SurfaceKHR createWin32SurfaceKHR;
     
     // Scene management
     SceneTransition sceneTransition;
@@ -236,7 +239,7 @@ typedef struct GlobalContext_SceneCompositor
     // Scene contexts (we'll store references to the actual scene contexts)
     GlobalContext_Scene0* scene0Context;
     GlobalContext_Scene1* scene1Context;
-    GlobalContext_Scene2* scene2Context;
+    struct GlobalContext_Scene2* scene2Context;
 } GlobalContext_SceneCompositor;
 
 static void InitializeGlobalContext_SceneCompositor(GlobalContext_SceneCompositor* context)
@@ -1649,7 +1652,7 @@ VkResult RenderSceneToTexture(SceneType sceneType, OffScreenTexture* targetTextu
     renderPassInfo.renderPass = targetTexture->renderPass;
     renderPassInfo.framebuffer = targetTexture->framebuffer;
     renderPassInfo.renderArea.offset = {0, 0};
-    renderPassInfo.renderArea.extent = {gContext_SceneCompositor.windowWidth, gContext_SceneCompositor.windowHeight};
+    renderPassInfo.renderArea.extent = {(uint32_t)gContext_SceneCompositor.windowWidth, (uint32_t)gContext_SceneCompositor.windowHeight};
     
     // Set different clear colors for different scenes
     VkClearValue clearColor = {};
@@ -1719,7 +1722,7 @@ VkResult RenderCompositor()
     renderPassInfo.renderPass = gContext_SceneCompositor.renderPass;
     renderPassInfo.framebuffer = gContext_SceneCompositor.framebuffers[gContext_SceneCompositor.currentImageIndex];
     renderPassInfo.renderArea.offset = {0, 0};
-    renderPassInfo.renderArea.extent = {gContext_SceneCompositor.windowWidth, gContext_SceneCompositor.windowHeight};
+    renderPassInfo.renderArea.extent = {(uint32_t)gContext_SceneCompositor.windowWidth, (uint32_t)gContext_SceneCompositor.windowHeight};
     
     VkClearValue clearValues[2];
     clearValues[0].color = {{0.0f, 0.0f, 0.0f, 1.0f}};
@@ -1739,7 +1742,7 @@ VkResult RenderCompositor()
     vkCmdBindVertexBuffers(commandBuffer, 0, 1, vertexBuffers, offsets);
     
     // Bind descriptor set
-    vkCmdBindDescriptorSet(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, gContext_SceneCompositor.compositorPipelineLayout, 0, 1, &gContext_SceneCompositor.compositorDescriptorSet, 0, nullptr);
+    vkCmdBindDescriptorSets(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, gContext_SceneCompositor.compositorPipelineLayout, 0, 1, &gContext_SceneCompositor.compositorDescriptorSet, 0, nullptr);
     
     // Draw full-screen quad
     vkCmdDraw(commandBuffer, 6, 1, 0, 0);
@@ -1943,7 +1946,7 @@ VkResult CreateCompositorPipeline()
     
     VkRect2D scissor = {};
     scissor.offset = {0, 0};
-    scissor.extent = {gContext_SceneCompositor.windowWidth, gContext_SceneCompositor.windowHeight};
+    scissor.extent = {(uint32_t)gContext_SceneCompositor.windowWidth, (uint32_t)gContext_SceneCompositor.windowHeight};
     
     VkPipelineViewportStateCreateInfo viewportState = {};
     viewportState.sType = VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO;
@@ -2855,6 +2858,14 @@ VkResult getSupportedSurface(void)
     //local variable declaration
     VkResult vkResult = VK_SUCCESS;
 
+    // Load the Win32 surface function pointer
+    gContext_SceneCompositor.createWin32SurfaceKHR = (PFN_vkCreateWin32SurfaceKHR)vkGetInstanceProcAddr(gContext_SceneCompositor.instance, "vkCreateWin32SurfaceKHR");
+    if(gContext_SceneCompositor.createWin32SurfaceKHR == NULL)
+    {
+        fprintf(gContext_SceneCompositor.logFile, "getSupportedSurface() --> vkGetInstanceProcAddr() failed to get vkCreateWin32SurfaceKHR function pointer\n");
+        return VK_ERROR_INITIALIZATION_FAILED;
+    }
+
     //Step2
     VkWin32SurfaceCreateInfoKHR vkWin32SurfaceCreateInfoKHR;
     memset((void*)&vkWin32SurfaceCreateInfoKHR, 0, sizeof(VkWin32SurfaceCreateInfoKHR));
@@ -2868,7 +2879,7 @@ VkResult getSupportedSurface(void)
     vkWin32SurfaceCreateInfoKHR.hwnd = gContext_SceneCompositor.win32Context.hwnd;
 
     //Step3:
-    vkResult = vkCreateWin32SurfaceKHR(gContext_SceneCompositor.instance,
+    vkResult = gContext_SceneCompositor.createWin32SurfaceKHR(gContext_SceneCompositor.instance,
                                        &vkWin32SurfaceCreateInfoKHR,
                                        NULL, //Memory mamnagement function is default
                                        &gContext_SceneCompositor.surface);

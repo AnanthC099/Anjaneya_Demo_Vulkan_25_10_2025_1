@@ -25,7 +25,7 @@
 #include "glm/gtc/quaternion.hpp"
 #endif
 
-#define MYICON 101
+// MYICON already defined in SceneCompositor.h
 #define MYAUDIO 102
 
 struct GlobalContext_Scene1;
