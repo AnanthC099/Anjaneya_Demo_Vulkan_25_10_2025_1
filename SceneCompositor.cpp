@@ -7,6 +7,7 @@
 #define STB_IMAGE_IMPLEMENTATION
 #include "stb_image.h"
 #include "SceneCompositor.h"
+#include "Scene0.h"
 //This inclusion of <vulkan/vulkan.h> is needed in all platforms
 //to distinguish the platfrom, below macro is needed
 #define VK_USE_PLATFORM_WIN32_KHR
@@ -218,6 +219,7 @@ typedef struct GlobalContext_SceneCompositor
     VkImageView textureImageView;
     VkSampler textureSampler;
     PFN_vkCreateDebugReportCallbackEXT createDebugReportCallback;
+    VkBool32 renderScene0; // Flag to determine whether to render Scene0 or default quad
 } GlobalContext_SceneCompositor;
 
 static void InitializeGlobalContext_SceneCompositor(GlobalContext_SceneCompositor* context)
@@ -306,6 +308,7 @@ static void InitializeGlobalContext_SceneCompositor(GlobalContext_SceneComposito
     context->textureImageView = VK_NULL_HANDLE;
     context->textureSampler = VK_NULL_HANDLE;
     context->createDebugReportCallback = NULL;
+    context->renderScene0 = VK_FALSE; // Start with default quad rendering
 }
 
 GlobalContext_SceneCompositor gContext_SceneCompositor;
@@ -475,6 +478,13 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT iMsg, WPARAM wParam, LPARAM lParam)
 		case 0x46:
 		case 0x66:
                         Win32FunctionTable_SceneCompositor.ToggleFullscreen();
+			break;
+
+		case 0x30: // Key '0'
+			// Toggle to Scene0 rendering
+			gContext_SceneCompositor.renderScene0 = !gContext_SceneCompositor.renderScene0;
+			fprintf(gContext_SceneCompositor.logFile, "Key 0 pressed: renderScene0 = %s\n", 
+				gContext_SceneCompositor.renderScene0 ? "true" : "false");
 			break;
 
 		default:
@@ -893,6 +903,18 @@ VkResult Initialize(void)
         fprintf(gContext_SceneCompositor.logFile, "Initialize() --> buildCommandBuffers() is succedded\n");
     }
     
+    //Initialize Scene0 function table and then Scene0
+    InitializeFunctionTable();
+    vkResult = gFunctionTable_Scene0.Initialize();
+    if(vkResult != VK_SUCCESS)
+    {
+        fprintf(gContext_SceneCompositor.logFile, "Initialize() --> Scene0 initialization failed %d\n", vkResult);
+    }
+    else
+    {
+        fprintf(gContext_SceneCompositor.logFile, "Initialize() --> Scene0 initialization succeeded\n");
+    }
+    
     //Initialization is completed
     gContext_SceneCompositor.isInitialized = TRUE;
     fprintf(gContext_SceneCompositor.logFile, "Initialize() --> Initialization is completed successfully\n");
@@ -1252,6 +1274,9 @@ VkResult Display(void)
 void Update(void)
 {
     gContext_SceneCompositor.angle = gContext_SceneCompositor.angle + 0.0f;
+    
+    // Also update Scene0
+    gWin32FunctionTable_Scene0.Update();
 }
 
 
@@ -1598,6 +1623,9 @@ void Uninitialize(void)
         gContext_SceneCompositor.instance = VK_NULL_HANDLE;
         fprintf(gContext_SceneCompositor.logFile, "Uninitialize() --> vkDestroyInstance() is done\n");
     }
+    
+    // Clean up Scene0
+    gWin32FunctionTable_Scene0.Uninitialize();
     
     if (gContext_SceneCompositor.logFile)
     {
@@ -5261,12 +5289,25 @@ VkResult buildCommandBuffers(void)
                                &gContext_SceneCompositor.texcoordVertexData.vkBuffer, //which buffer
                                vkDeviceSize_offset_texcoord);
                                      
-        // Draw a quad (2 triangles → 6 vertices)
-        vkCmdDraw(gContext_SceneCompositor.commandBuffers[i],
-                  6,  // vertices
-                  1,  // instances
-                  0,  // firstVertex
-                  0); // firstInstance
+        // Draw based on current scene mode
+        if (gContext_SceneCompositor.renderScene0)
+        {
+            // Render Scene0 (36 vertices for 3D object)
+            vkCmdDraw(gContext_SceneCompositor.commandBuffers[i],
+                      36, // vertices (Scene0 uses 36 vertices)
+                      1,  // instances
+                      0,  // firstVertex
+                      0); // firstInstance
+        }
+        else
+        {
+            // Draw a quad (2 triangles → 6 vertices)
+            vkCmdDraw(gContext_SceneCompositor.commandBuffers[i],
+                      6,  // vertices
+                      1,  // instances
+                      0,  // firstVertex
+                      0); // firstInstance
+        }
         
         //EndRenderPass
         vkCmdEndRenderPass(gContext_SceneCompositor.commandBuffers[i]);
