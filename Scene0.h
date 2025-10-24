@@ -210,6 +210,16 @@ struct GlobalContext_Scene0
 
     // Global
     float gFade = 1.0f;
+    
+    // Off-screen rendering support
+    VkFramebuffer offScreenFramebuffer = VK_NULL_HANDLE;
+    VkRenderPass offScreenRenderPass = VK_NULL_HANDLE;
+    VkCommandBuffer offScreenCommandBuffer = VK_NULL_HANDLE;
+    VkSemaphore offScreenRenderCompleteSemaphore = VK_NULL_HANDLE;
+    VkFence offScreenRenderCompleteFence = VK_NULL_HANDLE;
+    VkImageView offScreenImageView = VK_NULL_HANDLE;
+    VkImage offScreenImage = VK_NULL_HANDLE;
+    VkDeviceMemory offScreenImageMemory = VK_NULL_HANDLE;
 };
 
 #endif // RC_INVOKED
@@ -278,4 +288,5 @@ struct FunctionTable_Scene0
 extern FunctionTable_Scene0 gFunctionTable_Scene0;
 
 void InitializeFunctionTable(void);
+VkResult RenderToOffScreenTexture(VkImageView targetImageView, VkFramebuffer targetFramebuffer, VkRenderPass targetRenderPass);
 
