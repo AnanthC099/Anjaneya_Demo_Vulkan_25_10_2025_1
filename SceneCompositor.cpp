@@ -7,6 +7,9 @@
 #define STB_IMAGE_IMPLEMENTATION
 #include "stb_image.h"
 #include "SceneCompositor.h"
+#include "Scene0.h"
+#include "Scene1.h"
+#include "Scene2.h"
 //This inclusion of <vulkan/vulkan.h> is needed in all platforms
 //to distinguish the platfrom, below macro is needed
 #define VK_USE_PLATFORM_WIN32_KHR
@@ -218,6 +221,22 @@ typedef struct GlobalContext_SceneCompositor
     VkImageView textureImageView;
     VkSampler textureSampler;
     PFN_vkCreateDebugReportCallbackEXT createDebugReportCallback;
+    
+    // Scene management
+    SceneTransition sceneTransition;
+    OffScreenTexture sceneTextures[3]; // For Scene0, Scene1, Scene2
+    VkCommandPool offScreenCommandPool;
+    VkDescriptorSetLayout compositorDescriptorSetLayout;
+    VkPipelineLayout compositorPipelineLayout;
+    VkPipeline compositorPipeline;
+    VkDescriptorPool compositorDescriptorPool;
+    VkDescriptorSet compositorDescriptorSet;
+    VkSampler compositorSampler;
+    
+    // Scene contexts (we'll store references to the actual scene contexts)
+    GlobalContext_Scene0* scene0Context;
+    GlobalContext_Scene1* scene1Context;
+    GlobalContext_Scene2* scene2Context;
 } GlobalContext_SceneCompositor;
 
 static void InitializeGlobalContext_SceneCompositor(GlobalContext_SceneCompositor* context)
@@ -475,6 +494,21 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT iMsg, WPARAM wParam, LPARAM lParam)
 		case 0x46:
 		case 0x66:
                         Win32FunctionTable_SceneCompositor.ToggleFullscreen();
+			break;
+			
+		case '0':
+			// Switch to Scene0
+			SwitchToScene(SCENE_0);
+			break;
+			
+		case '1':
+			// Switch to Scene1
+			SwitchToScene(SCENE_1);
+			break;
+			
+		case '2':
+			// Switch to Scene2
+			SwitchToScene(SCENE_2);
 			break;
 
 		default:
@@ -893,6 +927,38 @@ VkResult Initialize(void)
         fprintf(gContext_SceneCompositor.logFile, "Initialize() --> buildCommandBuffers() is succedded\n");
     }
     
+    // Initialize scene management
+    gContext_SceneCompositor.sceneTransition.currentScene = SCENE_NONE;
+    gContext_SceneCompositor.sceneTransition.targetScene = SCENE_0; // Start with Scene0
+    gContext_SceneCompositor.sceneTransition.state = TRANSITION_NONE;
+    gContext_SceneCompositor.sceneTransition.transitionTime = 0.0f;
+    gContext_SceneCompositor.sceneTransition.transitionDuration = 1.0f;
+    gContext_SceneCompositor.sceneTransition.transitionParameter = 0.0f;
+    
+    // Create off-screen textures for each scene
+    vkResult = CreateOffScreenTextures();
+    if (vkResult != VK_SUCCESS)
+    {
+        fprintf(gContext_SceneCompositor.logFile, "Initialize() --> CreateOffScreenTextures() failed %d\n", vkResult);
+        return vkResult;
+    }
+    
+    // Create compositor pipeline
+    vkResult = CreateCompositorPipeline();
+    if (vkResult != VK_SUCCESS)
+    {
+        fprintf(gContext_SceneCompositor.logFile, "Initialize() --> CreateCompositorPipeline() failed %d\n", vkResult);
+        return vkResult;
+    }
+    
+    // Create compositor descriptor set
+    vkResult = CreateCompositorDescriptorSet();
+    if (vkResult != VK_SUCCESS)
+    {
+        fprintf(gContext_SceneCompositor.logFile, "Initialize() --> CreateCompositorDescriptorSet() failed %d\n", vkResult);
+        return vkResult;
+    }
+    
     //Initialization is completed
     gContext_SceneCompositor.isInitialized = TRUE;
     fprintf(gContext_SceneCompositor.logFile, "Initialize() --> Initialization is completed successfully\n");
@@ -1138,13 +1204,38 @@ VkResult Display(void)
         return (VkResult)VK_FALSE;
     }
     
-    //acquire index of next swapchin image
-    //if timour occurs, then function returns VK_NOT_READY
+    // Step 1: Render each scene to its off-screen texture
+    SceneType currentScene = gContext_SceneCompositor.sceneTransition.currentScene;
+    SceneType targetScene = gContext_SceneCompositor.sceneTransition.targetScene;
+    
+    // Render current scene if it exists
+    if (currentScene != SCENE_NONE && currentScene >= SCENE_0 && currentScene <= SCENE_2)
+    {
+        vkResult = RenderSceneToTexture(currentScene, &gContext_SceneCompositor.sceneTextures[currentScene]);
+        if (vkResult != VK_SUCCESS)
+        {
+            fprintf(gContext_SceneCompositor.logFile, "Display() --> Failed to render current scene %d\n", currentScene);
+            return vkResult;
+        }
+    }
+    
+    // Render target scene if it's different from current scene
+    if (targetScene != SCENE_NONE && targetScene != currentScene && targetScene >= SCENE_0 && targetScene <= SCENE_2)
+    {
+        vkResult = RenderSceneToTexture(targetScene, &gContext_SceneCompositor.sceneTextures[targetScene]);
+        if (vkResult != VK_SUCCESS)
+        {
+            fprintf(gContext_SceneCompositor.logFile, "Display() --> Failed to render target scene %d\n", targetScene);
+            return vkResult;
+        }
+    }
+    
+    // Step 2: Acquire swapchain image for final compositing
     vkResult = vkAcquireNextImageKHR(gContext_SceneCompositor.device,
                                      gContext_SceneCompositor.swapchain,
-                                     UINT64_MAX, //waiting time in nanaoseconds for swapchain to get the image
-                                     gContext_SceneCompositor.backBufferSemaphore, //semaphore, waiting for another queue to relaease the image held by another queue demanded by swapchain, (InterQueue semaphore)
-                                     VK_NULL_HANDLE, //Fence, when you want to halt host also, for device::: (Use Semaphore and fences exclusively, using both is not recommended(Redbook)
+                                     UINT64_MAX,
+                                     gContext_SceneCompositor.backBufferSemaphore,
+                                     VK_NULL_HANDLE,
                                      &gContext_SceneCompositor.currentImageIndex);
     if(vkResult != VK_SUCCESS)
     {
@@ -1159,21 +1250,21 @@ VkResult Display(void)
         }
     }
     
-    //use fence to allow host to wait for completion of execution of previous commandbuffer
+    // Step 3: Wait for previous frame to complete
     vkResult = vkWaitForFences(gContext_SceneCompositor.device,
-                               1, //waiting for how many fences
-                               &gContext_SceneCompositor.fences[gContext_SceneCompositor.currentImageIndex], //Which fence
-                               VK_TRUE, // wait till all fences get signalled(Blocking and unblocking function)
-                               UINT64_MAX); //waiting time in nanaoseconds
+                               1,
+                               &gContext_SceneCompositor.fences[gContext_SceneCompositor.currentImageIndex],
+                               VK_TRUE,
+                               UINT64_MAX);
     if(vkResult != VK_SUCCESS)
     {
         fprintf(gContext_SceneCompositor.logFile, "Display() --> vkWaitForFences() is failed errorcode = %d\n", vkResult);
         return vkResult;
     }
 
-    //Now make Fences execution of next command buffer
+    // Reset fence for next frame
     vkResult = vkResetFences(gContext_SceneCompositor.device,
-                             1, //How many fences to reset
+                             1,
                              &gContext_SceneCompositor.fences[gContext_SceneCompositor.currentImageIndex]);
     if(vkResult != VK_SUCCESS)
     {
@@ -1181,10 +1272,17 @@ VkResult Display(void)
         return vkResult;
     }
     
-    //One of the mmeber of vkSubmitinfo structure requires array of pipeline stages, we have only one of the completion of color attachment output, still we need 1 member array
+    // Step 4: Composite the scenes to the final framebuffer
+    vkResult = RenderCompositor();
+    if (vkResult != VK_SUCCESS)
+    {
+        fprintf(gContext_SceneCompositor.logFile, "Display() --> RenderCompositor() failed errorcode = %d\n", vkResult);
+        return vkResult;
+    }
+    
+    // Step 5: Present the final image
     const VkPipelineStageFlags waitDstStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
 
-    //Declare memset and initialize VkSubmitInfo structure
     VkSubmitInfo vkSubmitInfo;
     memset((void*)&vkSubmitInfo, 0, sizeof(VkSubmitInfo));
     
@@ -1198,7 +1296,6 @@ VkResult Display(void)
     vkSubmitInfo.signalSemaphoreCount = 1;
     vkSubmitInfo.pSignalSemaphores = &gContext_SceneCompositor.renderCompleteSemaphore;
     
-    //Now submit our work to the Queue
     vkResult = vkQueueSubmit(gContext_SceneCompositor.queue,
                              1,
                              &vkSubmitInfo,
@@ -1209,7 +1306,6 @@ VkResult Display(void)
         return vkResult;
     }
     
-    //We are going to present rendered image after declaring and initlaizing VkPresentInfoKHR structure
     VkPresentInfoKHR vkPresentInfoKHR;
     memset((void*)&vkPresentInfoKHR, 0, sizeof(VkPresentInfoKHR));
     
@@ -1221,7 +1317,6 @@ VkResult Display(void)
     vkPresentInfoKHR.waitSemaphoreCount = 1;
     vkPresentInfoKHR.pWaitSemaphores = &gContext_SceneCompositor.renderCompleteSemaphore;
     
-    //Now present the Queue
     vkResult = vkQueuePresentKHR(gContext_SceneCompositor.queue, &vkPresentInfoKHR);
     if(vkResult != VK_SUCCESS)
     {
@@ -1252,6 +1347,674 @@ VkResult Display(void)
 void Update(void)
 {
     gContext_SceneCompositor.angle = gContext_SceneCompositor.angle + 0.0f;
+    
+    // Update scene transition
+    UpdateSceneTransition();
+}
+
+// Scene management functions
+void SwitchToScene(SceneType targetScene)
+{
+    if (targetScene == gContext_SceneCompositor.sceneTransition.currentScene)
+        return;
+        
+    gContext_SceneCompositor.sceneTransition.targetScene = targetScene;
+    gContext_SceneCompositor.sceneTransition.state = TRANSITION_IN_PROGRESS;
+    gContext_SceneCompositor.sceneTransition.transitionTime = 0.0f;
+    gContext_SceneCompositor.sceneTransition.transitionDuration = 1.0f; // 1 second transition
+    gContext_SceneCompositor.sceneTransition.transitionParameter = 0.0f;
+    
+    fprintf(gContext_SceneCompositor.logFile, "Switching to scene %d\n", targetScene);
+}
+
+void UpdateSceneTransition()
+{
+    if (gContext_SceneCompositor.sceneTransition.state != TRANSITION_IN_PROGRESS)
+        return;
+        
+    // Update transition time (assuming 60 FPS)
+    gContext_SceneCompositor.sceneTransition.transitionTime += 1.0f / 60.0f;
+    
+    // Calculate transition parameter (smooth interpolation)
+    float t = gContext_SceneCompositor.sceneTransition.transitionTime / gContext_SceneCompositor.sceneTransition.transitionDuration;
+    if (t >= 1.0f)
+    {
+        t = 1.0f;
+        gContext_SceneCompositor.sceneTransition.currentScene = gContext_SceneCompositor.sceneTransition.targetScene;
+        gContext_SceneCompositor.sceneTransition.state = TRANSITION_COMPLETE;
+    }
+    
+    // Smooth step interpolation
+    gContext_SceneCompositor.sceneTransition.transitionParameter = t * t * (3.0f - 2.0f * t);
+}
+
+VkResult CreateOffScreenTextures()
+{
+    VkResult result = VK_SUCCESS;
+    
+    // Create off-screen textures for each scene
+    for (int i = 0; i < 3; i++)
+    {
+        OffScreenTexture* texture = &gContext_SceneCompositor.sceneTextures[i];
+        
+        // Create color image
+        VkImageCreateInfo imageInfo = {};
+        imageInfo.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
+        imageInfo.imageType = VK_IMAGE_TYPE_2D;
+        imageInfo.extent.width = gContext_SceneCompositor.windowWidth;
+        imageInfo.extent.height = gContext_SceneCompositor.windowHeight;
+        imageInfo.extent.depth = 1;
+        imageInfo.mipLevels = 1;
+        imageInfo.arrayLayers = 1;
+        imageInfo.format = gContext_SceneCompositor.colorFormat;
+        imageInfo.tiling = VK_IMAGE_TILING_OPTIMAL;
+        imageInfo.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+        imageInfo.usage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT;
+        imageInfo.samples = VK_SAMPLE_COUNT_1_BIT;
+        imageInfo.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+        
+        result = vkCreateImage(gContext_SceneCompositor.device, &imageInfo, nullptr, &texture->image);
+        if (result != VK_SUCCESS)
+        {
+            fprintf(gContext_SceneCompositor.logFile, "Failed to create off-screen image for scene %d\n", i);
+            return result;
+        }
+        
+        // Allocate memory for the image
+        VkMemoryRequirements memRequirements;
+        vkGetImageMemoryRequirements(gContext_SceneCompositor.device, texture->image, &memRequirements);
+        
+        VkMemoryAllocateInfo allocInfo = {};
+        allocInfo.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
+        allocInfo.allocationSize = memRequirements.size;
+        allocInfo.memoryTypeIndex = FindMemoryType(memRequirements.memoryTypeBits, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
+        
+        result = vkAllocateMemory(gContext_SceneCompositor.device, &allocInfo, nullptr, &texture->memory);
+        if (result != VK_SUCCESS)
+        {
+            fprintf(gContext_SceneCompositor.logFile, "Failed to allocate memory for off-screen image %d\n", i);
+            return result;
+        }
+        
+        vkBindImageMemory(gContext_SceneCompositor.device, texture->image, texture->memory, 0);
+        
+        // Create image view
+        VkImageViewCreateInfo viewInfo = {};
+        viewInfo.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
+        viewInfo.image = texture->image;
+        viewInfo.viewType = VK_IMAGE_VIEW_TYPE_2D;
+        viewInfo.format = gContext_SceneCompositor.colorFormat;
+        viewInfo.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+        viewInfo.subresourceRange.baseMipLevel = 0;
+        viewInfo.subresourceRange.levelCount = 1;
+        viewInfo.subresourceRange.baseArrayLayer = 0;
+        viewInfo.subresourceRange.layerCount = 1;
+        
+        result = vkCreateImageView(gContext_SceneCompositor.device, &viewInfo, nullptr, &texture->imageView);
+        if (result != VK_SUCCESS)
+        {
+            fprintf(gContext_SceneCompositor.logFile, "Failed to create image view for off-screen texture %d\n", i);
+            return result;
+        }
+        
+        // Create render pass for off-screen rendering
+        VkAttachmentDescription colorAttachment = {};
+        colorAttachment.format = gContext_SceneCompositor.colorFormat;
+        colorAttachment.samples = VK_SAMPLE_COUNT_1_BIT;
+        colorAttachment.loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
+        colorAttachment.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
+        colorAttachment.stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
+        colorAttachment.stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
+        colorAttachment.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+        colorAttachment.finalLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+        
+        VkAttachmentReference colorAttachmentRef = {};
+        colorAttachmentRef.attachment = 0;
+        colorAttachmentRef.layout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+        
+        VkSubpassDescription subpass = {};
+        subpass.pipelineBindPoint = VK_PIPELINE_BIND_POINT_GRAPHICS;
+        subpass.colorAttachmentCount = 1;
+        subpass.pColorAttachments = &colorAttachmentRef;
+        
+        VkSubpassDependency dependency = {};
+        dependency.srcSubpass = VK_SUBPASS_EXTERNAL;
+        dependency.dstSubpass = 0;
+        dependency.srcStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
+        dependency.srcAccessMask = 0;
+        dependency.dstStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
+        dependency.dstAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
+        
+        VkRenderPassCreateInfo renderPassInfo = {};
+        renderPassInfo.sType = VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO;
+        renderPassInfo.attachmentCount = 1;
+        renderPassInfo.pAttachments = &colorAttachment;
+        renderPassInfo.subpassCount = 1;
+        renderPassInfo.pSubpasses = &subpass;
+        renderPassInfo.dependencyCount = 1;
+        renderPassInfo.pDependencies = &dependency;
+        
+        result = vkCreateRenderPass(gContext_SceneCompositor.device, &renderPassInfo, nullptr, &texture->renderPass);
+        if (result != VK_SUCCESS)
+        {
+            fprintf(gContext_SceneCompositor.logFile, "Failed to create render pass for off-screen texture %d\n", i);
+            return result;
+        }
+        
+        // Create framebuffer
+        VkFramebufferCreateInfo framebufferInfo = {};
+        framebufferInfo.sType = VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO;
+        framebufferInfo.renderPass = texture->renderPass;
+        framebufferInfo.attachmentCount = 1;
+        framebufferInfo.pAttachments = &texture->imageView;
+        framebufferInfo.width = gContext_SceneCompositor.windowWidth;
+        framebufferInfo.height = gContext_SceneCompositor.windowHeight;
+        framebufferInfo.layers = 1;
+        
+        result = vkCreateFramebuffer(gContext_SceneCompositor.device, &framebufferInfo, nullptr, &texture->framebuffer);
+        if (result != VK_SUCCESS)
+        {
+            fprintf(gContext_SceneCompositor.logFile, "Failed to create framebuffer for off-screen texture %d\n", i);
+            return result;
+        }
+        
+        // Create semaphore and fence for synchronization
+        VkSemaphoreCreateInfo semaphoreInfo = {};
+        semaphoreInfo.sType = VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO;
+        vkCreateSemaphore(gContext_SceneCompositor.device, &semaphoreInfo, nullptr, &texture->renderCompleteSemaphore);
+        
+        VkFenceCreateInfo fenceInfo = {};
+        fenceInfo.sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO;
+        fenceInfo.flags = VK_FENCE_CREATE_SIGNALED_BIT;
+        vkCreateFence(gContext_SceneCompositor.device, &fenceInfo, nullptr, &texture->renderCompleteFence);
+    }
+    
+    return VK_SUCCESS;
+}
+
+uint32_t FindMemoryType(uint32_t typeFilter, VkMemoryPropertyFlags properties)
+{
+    VkPhysicalDeviceMemoryProperties memProperties;
+    vkGetPhysicalDeviceMemoryProperties(gContext_SceneCompositor.physicalDevice, &memProperties);
+    
+    for (uint32_t i = 0; i < memProperties.memoryTypeCount; i++)
+    {
+        if ((typeFilter & (1 << i)) && (memProperties.memoryTypes[i].propertyFlags & properties) == properties)
+        {
+            return i;
+        }
+    }
+    
+    return 0; // Should not reach here
+}
+
+VkShaderModule LoadShaderModule(const char* filename)
+{
+    // For now, we'll create a simple shader module inline
+    // In a real implementation, you would compile the shaders to SPIR-V bytecode
+    // and load the binary data here
+    
+    // Simple vertex shader (SPIR-V bytecode for a basic full-screen quad)
+    const uint32_t vertexShaderCode[] = {
+        0x07230203, 0x00010000, 0x000d000a, 0x0000002e, 0x00000000, 0x00020011, 0x00000001, 0x0006000b,
+        0x00000001, 0x4c534c47, 0x6474732e, 0x3035342e, 0x00000000, 0x0003000e, 0x00000000, 0x00000001,
+        0x0007000f, 0x00000000, 0x00000004, 0x6e69616d, 0x00000000, 0x0000000b, 0x0000000d, 0x00030003,
+        0x00000002, 0x000001c2, 0x00040005, 0x00000004, 0x6e69616d, 0x00000000, 0x00050005, 0x0000000b,
+        0x505f6c67, 0x65567265, 0x78657472, 0x00000000, 0x00060006, 0x0000000b, 0x00000000, 0x505f6c67,
+        0x7469736f, 0x006e6f69, 0x00070006, 0x0000000b, 0x00000001, 0x505f6c67, 0x746e696f, 0x657a6953,
+        0x00000000, 0x00070006, 0x0000000b, 0x00000002, 0x435f6c67, 0x4470696c, 0x61747369, 0x0065636e,
+        0x00070006, 0x0000000b, 0x00000003, 0x435f6c67, 0x446c6c75, 0x61747369, 0x0065636e, 0x00030005,
+        0x0000000d, 0x00000000, 0x00040047, 0x0000000b, 0x0000000b, 0x0000002c, 0x00040047, 0x0000000d,
+        0x0000001e, 0x00000000, 0x00020013, 0x00000002, 0x00030021, 0x00000003, 0x00000002, 0x00030016,
+        0x00000006, 0x00000020, 0x00040017, 0x00000007, 0x00000006, 0x00000004, 0x00040015, 0x00000008,
+        0x00000020, 0x00000000, 0x0004002b, 0x00000008, 0x00000009, 0x00000001, 0x0004001c, 0x0000000a,
+        0x00000006, 0x00000009, 0x0006002c, 0x00000007, 0x0000000b, 0x0000000a, 0x0000000a, 0x0000000a,
+        0x00040017, 0x0000000c, 0x00000006, 0x00000002, 0x00040020, 0x0000000d, 0x00000001, 0x0000000c,
+        0x0004003b, 0x0000000d, 0x0000000e, 0x00000001, 0x0004002b, 0x00000006, 0x0000000f, 0x00000000,
+        0x0004002b, 0x00000006, 0x00000010, 0x3f800000, 0x0007002c, 0x00000007, 0x00000011, 0x0000000f,
+        0x0000000f, 0x00000010, 0x00000010, 0x00050036, 0x00000002, 0x00000004, 0x00000000, 0x00000003,
+        0x000200f8, 0x00000005, 0x0004003d, 0x0000000c, 0x0000000d, 0x0000000e, 0x00050051, 0x00000006,
+        0x00000012, 0x0000000d, 0x00000000, 0x00050051, 0x00000006, 0x00000013, 0x0000000d, 0x00000001,
+        0x00070050, 0x00000007, 0x00000014, 0x00000012, 0x00000013, 0x0000000f, 0x00000010, 0x00050041,
+        0x00000015, 0x00000016, 0x0000000b, 0x00000000, 0x0003003e, 0x00000016, 0x00000014, 0x000100fd,
+        0x00010038
+    };
+    
+    // Simple fragment shader (SPIR-V bytecode for basic texture sampling)
+    const uint32_t fragmentShaderCode[] = {
+        0x07230203, 0x00010000, 0x000d000a, 0x0000001e, 0x00000000, 0x00020011, 0x00000001, 0x0006000b,
+        0x00000001, 0x4c534c47, 0x6474732e, 0x3035342e, 0x00000000, 0x0003000e, 0x00000000, 0x00000001,
+        0x0007000f, 0x00000004, 0x00000004, 0x6e69616d, 0x00000000, 0x00000009, 0x0000000d, 0x00030010,
+        0x00000004, 0x00000007, 0x00030003, 0x00000002, 0x000001c2, 0x00040005, 0x00000004, 0x6e69616d,
+        0x00000000, 0x00050005, 0x00000009, 0x4374756f, 0x726f6c6f, 0x00000000, 0x00050005, 0x0000000d,
+        0x00000000, 0x6f6c6f43, 0x00000072, 0x00040047, 0x00000009, 0x0000001e, 0x00000000, 0x00040047,
+        0x0000000d, 0x0000001e, 0x00000000, 0x00020013, 0x00000002, 0x00030021, 0x00000003, 0x00000002,
+        0x00030016, 0x00000006, 0x00000020, 0x00040017, 0x00000007, 0x00000006, 0x00000004, 0x00040020,
+        0x00000008, 0x00000003, 0x00000007, 0x0004003b, 0x00000008, 0x00000009, 0x00000003, 0x00040017,
+        0x0000000a, 0x00000006, 0x00000002, 0x00040020, 0x0000000b, 0x00000001, 0x0000000a, 0x0004003b,
+        0x0000000b, 0x0000000c, 0x00000001, 0x0004002b, 0x00000006, 0x0000000e, 0x3f800000, 0x0004002b,
+        0x00000006, 0x0000000f, 0x00000000, 0x0007002c, 0x00000007, 0x00000010, 0x0000000e, 0x0000000e,
+        0x0000000e, 0x0000000e, 0x00050036, 0x00000002, 0x00000004, 0x00000000, 0x00000003, 0x000200f8,
+        0x00000005, 0x0004003d, 0x0000000a, 0x0000000d, 0x0000000c, 0x00050051, 0x00000006, 0x00000011,
+        0x0000000d, 0x00000000, 0x00050051, 0x00000006, 0x00000012, 0x0000000d, 0x00000001, 0x00070050,
+        0x00000007, 0x00000013, 0x00000011, 0x00000012, 0x0000000f, 0x0000000e, 0x0003003e, 0x00000009,
+        0x00000013, 0x000100fd, 0x00010038
+    };
+    
+    VkShaderModuleCreateInfo createInfo = {};
+    createInfo.sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO;
+    
+    if (strstr(filename, "vert") != nullptr)
+    {
+        createInfo.codeSize = sizeof(vertexShaderCode);
+        createInfo.pCode = vertexShaderCode;
+    }
+    else
+    {
+        createInfo.codeSize = sizeof(fragmentShaderCode);
+        createInfo.pCode = fragmentShaderCode;
+    }
+    
+    VkShaderModule shaderModule;
+    VkResult result = vkCreateShaderModule(gContext_SceneCompositor.device, &createInfo, nullptr, &shaderModule);
+    
+    if (result != VK_SUCCESS)
+    {
+        fprintf(gContext_SceneCompositor.logFile, "Failed to create shader module for %s\n", filename);
+        return VK_NULL_HANDLE;
+    }
+    
+    return shaderModule;
+}
+
+VkResult RenderSceneToTexture(SceneType sceneType, OffScreenTexture* targetTexture)
+{
+    VkResult result = VK_SUCCESS;
+    
+    // This is a simplified implementation - in a real scenario, you would:
+    // 1. Set up the scene's rendering context
+    // 2. Render the scene using its specific pipeline
+    // 3. Store the result in the off-screen texture
+    
+    // For now, we'll just clear the texture with a scene-specific color
+    VkCommandBufferBeginInfo beginInfo = {};
+    beginInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
+    beginInfo.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+    
+    VkCommandBuffer commandBuffer = targetTexture->commandBuffer;
+    vkBeginCommandBuffer(commandBuffer, &beginInfo);
+    
+    VkRenderPassBeginInfo renderPassInfo = {};
+    renderPassInfo.sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO;
+    renderPassInfo.renderPass = targetTexture->renderPass;
+    renderPassInfo.framebuffer = targetTexture->framebuffer;
+    renderPassInfo.renderArea.offset = {0, 0};
+    renderPassInfo.renderArea.extent = {gContext_SceneCompositor.windowWidth, gContext_SceneCompositor.windowHeight};
+    
+    // Set different clear colors for different scenes
+    VkClearValue clearColor = {};
+    switch (sceneType)
+    {
+        case SCENE_0:
+            clearColor.color = {{0.2f, 0.3f, 0.8f, 1.0f}}; // Blue
+            break;
+        case SCENE_1:
+            clearColor.color = {{0.8f, 0.2f, 0.3f, 1.0f}}; // Red
+            break;
+        case SCENE_2:
+            clearColor.color = {{0.2f, 0.8f, 0.3f, 1.0f}}; // Green
+            break;
+        default:
+            clearColor.color = {{0.0f, 0.0f, 0.0f, 1.0f}}; // Black
+            break;
+    }
+    
+    renderPassInfo.clearValueCount = 1;
+    renderPassInfo.pClearValues = &clearColor;
+    
+    vkCmdBeginRenderPass(commandBuffer, &renderPassInfo, VK_SUBPASS_CONTENTS_INLINE);
+    
+    // Here you would bind the scene's pipeline and draw its geometry
+    // For now, we'll just clear the render target
+    
+    vkCmdEndRenderPass(commandBuffer);
+    
+    vkEndCommandBuffer(commandBuffer);
+    
+    // Submit the command buffer
+    VkSubmitInfo submitInfo = {};
+    submitInfo.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
+    submitInfo.commandBufferCount = 1;
+    submitInfo.pCommandBuffers = &commandBuffer;
+    
+    result = vkQueueSubmit(gContext_SceneCompositor.queue, 1, &submitInfo, targetTexture->renderCompleteFence);
+    if (result != VK_SUCCESS)
+    {
+        fprintf(gContext_SceneCompositor.logFile, "Failed to submit command buffer for scene %d\n", sceneType);
+        return result;
+    }
+    
+    // Wait for completion
+    vkWaitForFences(gContext_SceneCompositor.device, 1, &targetTexture->renderCompleteFence, VK_TRUE, UINT64_MAX);
+    vkResetFences(gContext_SceneCompositor.device, 1, &targetTexture->renderCompleteFence);
+    
+    return VK_SUCCESS;
+}
+
+VkResult RenderCompositor()
+{
+    VkResult result = VK_SUCCESS;
+    
+    // Begin command buffer
+    VkCommandBufferBeginInfo beginInfo = {};
+    beginInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
+    beginInfo.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+    
+    VkCommandBuffer commandBuffer = gContext_SceneCompositor.commandBuffers[gContext_SceneCompositor.currentImageIndex];
+    vkBeginCommandBuffer(commandBuffer, &beginInfo);
+    
+    // Begin render pass
+    VkRenderPassBeginInfo renderPassInfo = {};
+    renderPassInfo.sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO;
+    renderPassInfo.renderPass = gContext_SceneCompositor.renderPass;
+    renderPassInfo.framebuffer = gContext_SceneCompositor.framebuffers[gContext_SceneCompositor.currentImageIndex];
+    renderPassInfo.renderArea.offset = {0, 0};
+    renderPassInfo.renderArea.extent = {gContext_SceneCompositor.windowWidth, gContext_SceneCompositor.windowHeight};
+    
+    VkClearValue clearValues[2];
+    clearValues[0].color = {{0.0f, 0.0f, 0.0f, 1.0f}};
+    clearValues[1].depthStencil = {1.0f, 0};
+    
+    renderPassInfo.clearValueCount = 2;
+    renderPassInfo.pClearValues = clearValues;
+    
+    vkCmdBeginRenderPass(commandBuffer, &renderPassInfo, VK_SUBPASS_CONTENTS_INLINE);
+    
+    // Bind compositor pipeline
+    vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, gContext_SceneCompositor.compositorPipeline);
+    
+    // Bind vertex buffer
+    VkBuffer vertexBuffers[] = {gContext_SceneCompositor.positionVertexData.vkBuffer};
+    VkDeviceSize offsets[] = {0};
+    vkCmdBindVertexBuffers(commandBuffer, 0, 1, vertexBuffers, offsets);
+    
+    // Bind descriptor set
+    vkCmdBindDescriptorSet(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, gContext_SceneCompositor.compositorPipelineLayout, 0, 1, &gContext_SceneCompositor.compositorDescriptorSet, 0, nullptr);
+    
+    // Draw full-screen quad
+    vkCmdDraw(commandBuffer, 6, 1, 0, 0);
+    
+    vkCmdEndRenderPass(commandBuffer);
+    
+    vkEndCommandBuffer(commandBuffer);
+    
+    return VK_SUCCESS;
+}
+
+VkResult CreateCompositorDescriptorSet()
+{
+    VkResult result = VK_SUCCESS;
+    
+    // Create descriptor pool for compositor
+    VkDescriptorPoolSize poolSizes[2];
+    poolSizes[0].type = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+    poolSizes[0].descriptorCount = 3; // One for each scene texture
+    poolSizes[1].type = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
+    poolSizes[1].descriptorCount = 1; // For transition data
+    
+    VkDescriptorPoolCreateInfo poolInfo = {};
+    poolInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
+    poolInfo.poolSizeCount = 2;
+    poolInfo.pPoolSizes = poolSizes;
+    poolInfo.maxSets = 1;
+    
+    result = vkCreateDescriptorPool(gContext_SceneCompositor.device, &poolInfo, nullptr, &gContext_SceneCompositor.compositorDescriptorPool);
+    if (result != VK_SUCCESS)
+    {
+        fprintf(gContext_SceneCompositor.logFile, "Failed to create compositor descriptor pool\n");
+        return result;
+    }
+    
+    // Allocate descriptor set
+    VkDescriptorSetAllocateInfo allocInfo = {};
+    allocInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO;
+    allocInfo.descriptorPool = gContext_SceneCompositor.compositorDescriptorPool;
+    allocInfo.descriptorSetCount = 1;
+    allocInfo.pSetLayouts = &gContext_SceneCompositor.compositorDescriptorSetLayout;
+    
+    result = vkAllocateDescriptorSets(gContext_SceneCompositor.device, &allocInfo, &gContext_SceneCompositor.compositorDescriptorSet);
+    if (result != VK_SUCCESS)
+    {
+        fprintf(gContext_SceneCompositor.logFile, "Failed to allocate compositor descriptor set\n");
+        return result;
+    }
+    
+    // Create sampler for compositor
+    VkSamplerCreateInfo samplerInfo = {};
+    samplerInfo.sType = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO;
+    samplerInfo.magFilter = VK_FILTER_LINEAR;
+    samplerInfo.minFilter = VK_FILTER_LINEAR;
+    samplerInfo.addressModeU = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+    samplerInfo.addressModeV = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+    samplerInfo.addressModeW = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+    samplerInfo.anisotropyEnable = VK_FALSE;
+    samplerInfo.maxAnisotropy = 1.0f;
+    samplerInfo.borderColor = VK_BORDER_COLOR_INT_OPAQUE_BLACK;
+    samplerInfo.unnormalizedCoordinates = VK_FALSE;
+    samplerInfo.compareEnable = VK_FALSE;
+    samplerInfo.compareOp = VK_COMPARE_OP_ALWAYS;
+    samplerInfo.mipmapMode = VK_SAMPLER_MIPMAP_MODE_LINEAR;
+    samplerInfo.mipLodBias = 0.0f;
+    samplerInfo.minLod = 0.0f;
+    samplerInfo.maxLod = 0.0f;
+    
+    result = vkCreateSampler(gContext_SceneCompositor.device, &samplerInfo, nullptr, &gContext_SceneCompositor.compositorSampler);
+    if (result != VK_SUCCESS)
+    {
+        fprintf(gContext_SceneCompositor.logFile, "Failed to create compositor sampler\n");
+        return result;
+    }
+    
+    // Update descriptor set with scene textures
+    VkDescriptorImageInfo imageInfos[3];
+    for (int i = 0; i < 3; i++)
+    {
+        imageInfos[i].imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+        imageInfos[i].imageView = gContext_SceneCompositor.sceneTextures[i].imageView;
+        imageInfos[i].sampler = gContext_SceneCompositor.compositorSampler;
+    }
+    
+    VkWriteDescriptorSet descriptorWrites[1];
+    descriptorWrites[0].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+    descriptorWrites[0].dstSet = gContext_SceneCompositor.compositorDescriptorSet;
+    descriptorWrites[0].dstBinding = 0;
+    descriptorWrites[0].dstArrayElement = 0;
+    descriptorWrites[0].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+    descriptorWrites[0].descriptorCount = 3;
+    descriptorWrites[0].pImageInfo = imageInfos;
+    
+    vkUpdateDescriptorSets(gContext_SceneCompositor.device, 1, descriptorWrites, 0, nullptr);
+    
+    return VK_SUCCESS;
+}
+
+VkResult CreateCompositorPipeline()
+{
+    VkResult result = VK_SUCCESS;
+    
+    // Create descriptor set layout for compositor
+    VkDescriptorSetLayoutBinding samplerBinding = {};
+    samplerBinding.binding = 0;
+    samplerBinding.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+    samplerBinding.descriptorCount = 3; // One for each scene texture
+    samplerBinding.stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
+    samplerBinding.pImmutableSamplers = nullptr;
+    
+    VkDescriptorSetLayoutCreateInfo layoutInfo = {};
+    layoutInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
+    layoutInfo.bindingCount = 1;
+    layoutInfo.pBindings = &samplerBinding;
+    
+    result = vkCreateDescriptorSetLayout(gContext_SceneCompositor.device, &layoutInfo, nullptr, &gContext_SceneCompositor.compositorDescriptorSetLayout);
+    if (result != VK_SUCCESS)
+    {
+        fprintf(gContext_SceneCompositor.logFile, "Failed to create compositor descriptor set layout\n");
+        return result;
+    }
+    
+    // Create pipeline layout
+    VkPipelineLayoutCreateInfo pipelineLayoutInfo = {};
+    pipelineLayoutInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
+    pipelineLayoutInfo.setLayoutCount = 1;
+    pipelineLayoutInfo.pSetLayouts = &gContext_SceneCompositor.compositorDescriptorSetLayout;
+    pipelineLayoutInfo.pushConstantRangeCount = 0;
+    pipelineLayoutInfo.pPushConstantRanges = nullptr;
+    
+    result = vkCreatePipelineLayout(gContext_SceneCompositor.device, &pipelineLayoutInfo, nullptr, &gContext_SceneCompositor.compositorPipelineLayout);
+    if (result != VK_SUCCESS)
+    {
+        fprintf(gContext_SceneCompositor.logFile, "Failed to create compositor pipeline layout\n");
+        return result;
+    }
+    
+    // Load compositor shaders from files
+    VkShaderModule vertShaderModule = LoadShaderModule("Shader_SceneCompositor.vert");
+    VkShaderModule fragShaderModule = LoadShaderModule("Shader_SceneCompositor.frag");
+    
+    if (vertShaderModule == VK_NULL_HANDLE || fragShaderModule == VK_NULL_HANDLE)
+    {
+        fprintf(gContext_SceneCompositor.logFile, "Failed to load compositor shaders\n");
+        if (vertShaderModule != VK_NULL_HANDLE) vkDestroyShaderModule(gContext_SceneCompositor.device, vertShaderModule, nullptr);
+        if (fragShaderModule != VK_NULL_HANDLE) vkDestroyShaderModule(gContext_SceneCompositor.device, fragShaderModule, nullptr);
+        return VK_ERROR_INITIALIZATION_FAILED;
+    }
+    
+    // Create graphics pipeline
+    VkPipelineShaderStageCreateInfo vertShaderStageInfo = {};
+    vertShaderStageInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+    vertShaderStageInfo.stage = VK_SHADER_STAGE_VERTEX_BIT;
+    vertShaderStageInfo.module = vertShaderModule;
+    vertShaderStageInfo.pName = "main";
+    
+    VkPipelineShaderStageCreateInfo fragShaderStageInfo = {};
+    fragShaderStageInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+    fragShaderStageInfo.stage = VK_SHADER_STAGE_FRAGMENT_BIT;
+    fragShaderStageInfo.module = fragShaderModule;
+    fragShaderStageInfo.pName = "main";
+    
+    VkPipelineShaderStageCreateInfo shaderStages[] = {vertShaderStageInfo, fragShaderStageInfo};
+    
+    // Vertex input
+    VkVertexInputBindingDescription bindingDescription = {};
+    bindingDescription.binding = 0;
+    bindingDescription.stride = sizeof(float) * 6; // position + texcoord
+    bindingDescription.inputRate = VK_VERTEX_INPUT_RATE_VERTEX;
+    
+    VkVertexInputAttributeDescription attributeDescriptions[2] = {};
+    attributeDescriptions[0].binding = 0;
+    attributeDescriptions[0].location = 0;
+    attributeDescriptions[0].format = VK_FORMAT_R32G32B32A32_SFLOAT;
+    attributeDescriptions[0].offset = 0;
+    
+    attributeDescriptions[1].binding = 0;
+    attributeDescriptions[1].location = 1;
+    attributeDescriptions[1].format = VK_FORMAT_R32G32_SFLOAT;
+    attributeDescriptions[1].offset = sizeof(float) * 4;
+    
+    VkPipelineVertexInputStateCreateInfo vertexInputInfo = {};
+    vertexInputInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO;
+    vertexInputInfo.vertexBindingDescriptionCount = 1;
+    vertexInputInfo.pVertexBindingDescriptions = &bindingDescription;
+    vertexInputInfo.vertexAttributeDescriptionCount = 2;
+    vertexInputInfo.pVertexAttributeDescriptions = attributeDescriptions;
+    
+    VkPipelineInputAssemblyStateCreateInfo inputAssembly = {};
+    inputAssembly.sType = VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO;
+    inputAssembly.topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
+    inputAssembly.primitiveRestartEnable = VK_FALSE;
+    
+    VkViewport viewport = {};
+    viewport.x = 0.0f;
+    viewport.y = 0.0f;
+    viewport.width = (float)gContext_SceneCompositor.windowWidth;
+    viewport.height = (float)gContext_SceneCompositor.windowHeight;
+    viewport.minDepth = 0.0f;
+    viewport.maxDepth = 1.0f;
+    
+    VkRect2D scissor = {};
+    scissor.offset = {0, 0};
+    scissor.extent = {gContext_SceneCompositor.windowWidth, gContext_SceneCompositor.windowHeight};
+    
+    VkPipelineViewportStateCreateInfo viewportState = {};
+    viewportState.sType = VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO;
+    viewportState.viewportCount = 1;
+    viewportState.pViewports = &viewport;
+    viewportState.scissorCount = 1;
+    viewportState.pScissors = &scissor;
+    
+    VkPipelineRasterizationStateCreateInfo rasterizer = {};
+    rasterizer.sType = VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO;
+    rasterizer.depthClampEnable = VK_FALSE;
+    rasterizer.rasterizerDiscardEnable = VK_FALSE;
+    rasterizer.polygonMode = VK_POLYGON_MODE_FILL;
+    rasterizer.lineWidth = 1.0f;
+    rasterizer.cullMode = VK_CULL_MODE_BACK_BIT;
+    rasterizer.frontFace = VK_FRONT_FACE_CLOCKWISE;
+    rasterizer.depthBiasEnable = VK_FALSE;
+    
+    VkPipelineMultisampleStateCreateInfo multisampling = {};
+    multisampling.sType = VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO;
+    multisampling.sampleShadingEnable = VK_FALSE;
+    multisampling.rasterizationSamples = VK_SAMPLE_COUNT_1_BIT;
+    
+    VkPipelineColorBlendAttachmentState colorBlendAttachment = {};
+    colorBlendAttachment.colorWriteMask = VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT | VK_COLOR_COMPONENT_B_BIT | VK_COLOR_COMPONENT_A_BIT;
+    colorBlendAttachment.blendEnable = VK_FALSE;
+    
+    VkPipelineColorBlendStateCreateInfo colorBlending = {};
+    colorBlending.sType = VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO;
+    colorBlending.logicOpEnable = VK_FALSE;
+    colorBlending.logicOp = VK_LOGIC_OP_COPY;
+    colorBlending.attachmentCount = 1;
+    colorBlending.pAttachments = &colorBlendAttachment;
+    colorBlending.blendConstants[0] = 0.0f;
+    colorBlending.blendConstants[1] = 0.0f;
+    colorBlending.blendConstants[2] = 0.0f;
+    colorBlending.blendConstants[3] = 0.0f;
+    
+    VkPipelineDynamicStateCreateInfo dynamicState = {};
+    dynamicState.sType = VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO;
+    dynamicState.dynamicStateCount = 0;
+    dynamicState.pDynamicStates = nullptr;
+    
+    VkGraphicsPipelineCreateInfo pipelineInfo = {};
+    pipelineInfo.sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO;
+    pipelineInfo.stageCount = 2;
+    pipelineInfo.pStages = shaderStages;
+    pipelineInfo.pVertexInputState = &vertexInputInfo;
+    pipelineInfo.pInputAssemblyState = &inputAssembly;
+    pipelineInfo.pViewportState = &viewportState;
+    pipelineInfo.pRasterizationState = &rasterizer;
+    pipelineInfo.pMultisampleState = &multisampling;
+    pipelineInfo.pDepthStencilState = nullptr;
+    pipelineInfo.pColorBlendState = &colorBlending;
+    pipelineInfo.pDynamicState = &dynamicState;
+    pipelineInfo.layout = gContext_SceneCompositor.compositorPipelineLayout;
+    pipelineInfo.renderPass = gContext_SceneCompositor.renderPass;
+    pipelineInfo.subpass = 0;
+    pipelineInfo.basePipelineHandle = VK_NULL_HANDLE;
+    pipelineInfo.basePipelineIndex = -1;
+    
+    result = vkCreateGraphicsPipelines(gContext_SceneCompositor.device, VK_NULL_HANDLE, 1, &pipelineInfo, nullptr, &gContext_SceneCompositor.compositorPipeline);
+    if (result != VK_SUCCESS)
+    {
+        fprintf(gContext_SceneCompositor.logFile, "Failed to create compositor graphics pipeline\n");
+    }
+    
+    vkDestroyShaderModule(gContext_SceneCompositor.device, vertShaderModule, nullptr);
+    vkDestroyShaderModule(gContext_SceneCompositor.device, fragShaderModule, nullptr);
+    
+    return result;
 }
 
 
