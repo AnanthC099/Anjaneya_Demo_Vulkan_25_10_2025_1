@@ -4,17 +4,11 @@
 layout(location = 0) in vec4 vPosition;
 layout(location = 1) in vec2 vTexCoord;
 layout(location = 0) out vec2 out_TexCoord;
-//uniform
-layout(binding = 0) uniform MVPMatrix
-{
-    mat4 modelMatrix;
-    mat4 viewMatrix;
-    mat4 projectionMatrix;
-} uMVP;
 
 void main (void)
 {
     //code
-    gl_Position = uMVP.projectionMatrix * uMVP.viewMatrix * uMVP.modelMatrix * vPosition;
+    // For full-screen quad, we can use the position directly
+    gl_Position = vPosition;
     out_TexCoord = vTexCoord;
 }
