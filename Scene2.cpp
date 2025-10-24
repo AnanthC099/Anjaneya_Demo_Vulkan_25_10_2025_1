@@ -218,6 +218,16 @@ typedef struct GlobalContext_Scene2
     VkImageView textureImageView;
     VkSampler textureSampler;
     PFN_vkCreateDebugReportCallbackEXT createDebugReportCallback;
+    
+    // Off-screen rendering support
+    VkFramebuffer offScreenFramebuffer = VK_NULL_HANDLE;
+    VkRenderPass offScreenRenderPass = VK_NULL_HANDLE;
+    VkCommandBuffer offScreenCommandBuffer = VK_NULL_HANDLE;
+    VkSemaphore offScreenRenderCompleteSemaphore = VK_NULL_HANDLE;
+    VkFence offScreenRenderCompleteFence = VK_NULL_HANDLE;
+    VkImageView offScreenImageView = VK_NULL_HANDLE;
+    VkImage offScreenImage = VK_NULL_HANDLE;
+    VkDeviceMemory offScreenImageMemory = VK_NULL_HANDLE;
 } GlobalContext_Scene2;
 
 static void InitializeGlobalContext_Scene2(GlobalContext_Scene2* context)
@@ -5348,4 +5358,119 @@ static void PopulateFunctionTable_Scene2(void)
     FunctionTable_Scene2.createFences = createFences;
     FunctionTable_Scene2.buildCommandBuffers = buildCommandBuffers;
     FunctionTable_Scene2.debugReportCallback = debugReportCallback;
+}
+
+VkResult RenderToOffScreenTexture(VkImageView targetImageView, VkFramebuffer targetFramebuffer, VkRenderPass targetRenderPass)
+{
+    VkResult result = VK_SUCCESS;
+    
+    // Check if scene is initialized
+    if (gContext_Scene2.isInitialized == FALSE)
+    {
+        fprintf(gContext_Scene2.logFile, "RenderToOffScreenTexture() --> Scene2 not initialized\n");
+        return VK_FALSE;
+    }
+    
+    // Create command buffer for off-screen rendering
+    VkCommandBufferAllocateInfo allocInfo = {};
+    allocInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
+    allocInfo.commandPool = gContext_Scene2.commandPool;
+    allocInfo.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
+    allocInfo.commandBufferCount = 1;
+    
+    VkCommandBuffer commandBuffer;
+    result = vkAllocateCommandBuffers(gContext_Scene2.device, &allocInfo, &commandBuffer);
+    if (result != VK_SUCCESS)
+    {
+        fprintf(gContext_Scene2.logFile, "RenderToOffScreenTexture() --> Failed to allocate command buffer\n");
+        return result;
+    }
+    
+    // Begin command buffer
+    VkCommandBufferBeginInfo beginInfo = {};
+    beginInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
+    beginInfo.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+    
+    result = vkBeginCommandBuffer(commandBuffer, &beginInfo);
+    if (result != VK_SUCCESS)
+    {
+        fprintf(gContext_Scene2.logFile, "RenderToOffScreenTexture() --> Failed to begin command buffer\n");
+        return result;
+    }
+    
+    // Begin render pass
+    VkRenderPassBeginInfo renderPassInfo = {};
+    renderPassInfo.sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO;
+    renderPassInfo.renderPass = targetRenderPass;
+    renderPassInfo.framebuffer = targetFramebuffer;
+    renderPassInfo.renderArea.offset = {0, 0};
+    renderPassInfo.renderArea.extent = {gContext_Scene2.windowWidth, gContext_Scene2.windowHeight};
+    
+    VkClearValue clearValues[2];
+    clearValues[0].color = gContext_Scene2.clearColor;
+    clearValues[1].depthStencil = gContext_Scene2.clearDepthStencil;
+    
+    renderPassInfo.clearValueCount = 2;
+    renderPassInfo.pClearValues = clearValues;
+    
+    vkCmdBeginRenderPass(commandBuffer, &renderPassInfo, VK_SUBPASS_CONTENTS_INLINE);
+    
+    // Bind pipeline
+    vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, gContext_Scene2.pipeline);
+    
+    // Bind vertex buffers
+    VkBuffer vertexBuffers[] = {gContext_Scene2.positionVertexData.vkBuffer, gContext_Scene2.texcoordVertexData.vkBuffer};
+    VkDeviceSize offsets[] = {0, 0};
+    vkCmdBindVertexBuffers(commandBuffer, 0, 2, vertexBuffers, offsets);
+    
+    // Bind descriptor set
+    vkCmdBindDescriptorSet(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, gContext_Scene2.pipelineLayout, 0, 1, &gContext_Scene2.descriptorSet, 0, nullptr);
+    
+    // Set viewport and scissor
+    VkViewport viewport = {};
+    viewport.x = 0.0f;
+    viewport.y = 0.0f;
+    viewport.width = (float)gContext_Scene2.windowWidth;
+    viewport.height = (float)gContext_Scene2.windowHeight;
+    viewport.minDepth = 0.0f;
+    viewport.maxDepth = 1.0f;
+    vkCmdSetViewport(commandBuffer, 0, 1, &viewport);
+    
+    VkRect2D scissor = {};
+    scissor.offset = {0, 0};
+    scissor.extent = {gContext_Scene2.windowWidth, gContext_Scene2.windowHeight};
+    vkCmdSetScissor(commandBuffer, 0, 1, &scissor);
+    
+    // Draw (assuming we have a quad or triangle)
+    vkCmdDraw(commandBuffer, 6, 1, 0, 0); // Draw full-screen quad
+    
+    vkCmdEndRenderPass(commandBuffer);
+    
+    result = vkEndCommandBuffer(commandBuffer);
+    if (result != VK_SUCCESS)
+    {
+        fprintf(gContext_Scene2.logFile, "RenderToOffScreenTexture() --> Failed to end command buffer\n");
+        return result;
+    }
+    
+    // Submit command buffer
+    VkSubmitInfo submitInfo = {};
+    submitInfo.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
+    submitInfo.commandBufferCount = 1;
+    submitInfo.pCommandBuffers = &commandBuffer;
+    
+    result = vkQueueSubmit(gContext_Scene2.queue, 1, &submitInfo, VK_NULL_HANDLE);
+    if (result != VK_SUCCESS)
+    {
+        fprintf(gContext_Scene2.logFile, "RenderToOffScreenTexture() --> Failed to submit command buffer\n");
+        return result;
+    }
+    
+    // Wait for completion
+    vkQueueWaitIdle(gContext_Scene2.queue);
+    
+    // Clean up command buffer
+    vkFreeCommandBuffers(gContext_Scene2.device, gContext_Scene2.commandPool, 1, &commandBuffer);
+    
+    return VK_SUCCESS;
 }

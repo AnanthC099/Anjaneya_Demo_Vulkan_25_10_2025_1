@@ -1631,12 +1631,77 @@ VkResult RenderSceneToTexture(SceneType sceneType, OffScreenTexture* targetTextu
 {
     VkResult result = VK_SUCCESS;
     
-    // This is a simplified implementation - in a real scenario, you would:
-    // 1. Set up the scene's rendering context
-    // 2. Render the scene using its specific pipeline
-    // 3. Store the result in the off-screen texture
+    // Call the actual scene rendering function based on scene type
+    switch (sceneType)
+    {
+        case SCENE_0:
+            // Initialize Scene0 if not already done
+            if (gContext_SceneCompositor.scene0Context == nullptr)
+            {
+                // TODO: Initialize Scene0 context
+                // For now, use placeholder rendering
+                result = RenderScene0Placeholder(targetTexture);
+            }
+            else
+            {
+                // Call Scene0's off-screen rendering function
+                result = gFunctionTable_Scene0.RenderToOffScreenTexture(
+                    targetTexture->imageView, 
+                    targetTexture->framebuffer, 
+                    targetTexture->renderPass
+                );
+            }
+            break;
+            
+        case SCENE_1:
+            // Initialize Scene1 if not already done
+            if (gContext_SceneCompositor.scene1Context == nullptr)
+            {
+                // TODO: Initialize Scene1 context
+                // For now, use placeholder rendering
+                result = RenderScene1Placeholder(targetTexture);
+            }
+            else
+            {
+                // Call Scene1's off-screen rendering function
+                result = gFunctionTable_Scene1.RenderToOffScreenTexture(
+                    targetTexture->imageView, 
+                    targetTexture->framebuffer, 
+                    targetTexture->renderPass
+                );
+            }
+            break;
+            
+        case SCENE_2:
+            // Initialize Scene2 if not already done
+            if (gContext_SceneCompositor.scene2Context == nullptr)
+            {
+                // TODO: Initialize Scene2 context
+                // For now, use placeholder rendering
+                result = RenderScene2Placeholder(targetTexture);
+            }
+            else
+            {
+                // Call Scene2's off-screen rendering function
+                result = RenderToOffScreenTexture(
+                    targetTexture->imageView, 
+                    targetTexture->framebuffer, 
+                    targetTexture->renderPass
+                );
+            }
+            break;
+            
+        default:
+            fprintf(gContext_SceneCompositor.logFile, "Unknown scene type: %d\n", sceneType);
+            return VK_ERROR_INVALID_EXTERNAL_HANDLE;
+    }
     
-    // For now, we'll just clear the texture with a scene-specific color
+    return result;
+}
+
+// Placeholder rendering functions for each scene
+VkResult RenderScene0Placeholder(OffScreenTexture* targetTexture)
+{
     VkCommandBufferBeginInfo beginInfo = {};
     beginInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
     beginInfo.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
@@ -1651,50 +1716,119 @@ VkResult RenderSceneToTexture(SceneType sceneType, OffScreenTexture* targetTextu
     renderPassInfo.renderArea.offset = {0, 0};
     renderPassInfo.renderArea.extent = {gContext_SceneCompositor.windowWidth, gContext_SceneCompositor.windowHeight};
     
-    // Set different clear colors for different scenes
     VkClearValue clearColor = {};
-    switch (sceneType)
-    {
-        case SCENE_0:
-            clearColor.color = {{0.2f, 0.3f, 0.8f, 1.0f}}; // Blue
-            break;
-        case SCENE_1:
-            clearColor.color = {{0.8f, 0.2f, 0.3f, 1.0f}}; // Red
-            break;
-        case SCENE_2:
-            clearColor.color = {{0.2f, 0.8f, 0.3f, 1.0f}}; // Green
-            break;
-        default:
-            clearColor.color = {{0.0f, 0.0f, 0.0f, 1.0f}}; // Black
-            break;
-    }
+    clearColor.color = {{0.2f, 0.3f, 0.8f, 1.0f}}; // Blue for Scene0
     
     renderPassInfo.clearValueCount = 1;
     renderPassInfo.pClearValues = &clearColor;
     
     vkCmdBeginRenderPass(commandBuffer, &renderPassInfo, VK_SUBPASS_CONTENTS_INLINE);
-    
-    // Here you would bind the scene's pipeline and draw its geometry
-    // For now, we'll just clear the render target
-    
     vkCmdEndRenderPass(commandBuffer);
     
     vkEndCommandBuffer(commandBuffer);
     
-    // Submit the command buffer
     VkSubmitInfo submitInfo = {};
     submitInfo.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
     submitInfo.commandBufferCount = 1;
     submitInfo.pCommandBuffers = &commandBuffer;
     
-    result = vkQueueSubmit(gContext_SceneCompositor.queue, 1, &submitInfo, targetTexture->renderCompleteFence);
+    VkResult result = vkQueueSubmit(gContext_SceneCompositor.queue, 1, &submitInfo, targetTexture->renderCompleteFence);
     if (result != VK_SUCCESS)
     {
-        fprintf(gContext_SceneCompositor.logFile, "Failed to submit command buffer for scene %d\n", sceneType);
+        fprintf(gContext_SceneCompositor.logFile, "Failed to submit command buffer for Scene0\n");
         return result;
     }
     
-    // Wait for completion
+    vkWaitForFences(gContext_SceneCompositor.device, 1, &targetTexture->renderCompleteFence, VK_TRUE, UINT64_MAX);
+    vkResetFences(gContext_SceneCompositor.device, 1, &targetTexture->renderCompleteFence);
+    
+    return VK_SUCCESS;
+}
+
+VkResult RenderScene1Placeholder(OffScreenTexture* targetTexture)
+{
+    VkCommandBufferBeginInfo beginInfo = {};
+    beginInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
+    beginInfo.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+    
+    VkCommandBuffer commandBuffer = targetTexture->commandBuffer;
+    vkBeginCommandBuffer(commandBuffer, &beginInfo);
+    
+    VkRenderPassBeginInfo renderPassInfo = {};
+    renderPassInfo.sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO;
+    renderPassInfo.renderPass = targetTexture->renderPass;
+    renderPassInfo.framebuffer = targetTexture->framebuffer;
+    renderPassInfo.renderArea.offset = {0, 0};
+    renderPassInfo.renderArea.extent = {gContext_SceneCompositor.windowWidth, gContext_SceneCompositor.windowHeight};
+    
+    VkClearValue clearColor = {};
+    clearColor.color = {{0.8f, 0.2f, 0.3f, 1.0f}}; // Red for Scene1
+    
+    renderPassInfo.clearValueCount = 1;
+    renderPassInfo.pClearValues = &clearColor;
+    
+    vkCmdBeginRenderPass(commandBuffer, &renderPassInfo, VK_SUBPASS_CONTENTS_INLINE);
+    vkCmdEndRenderPass(commandBuffer);
+    
+    vkEndCommandBuffer(commandBuffer);
+    
+    VkSubmitInfo submitInfo = {};
+    submitInfo.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
+    submitInfo.commandBufferCount = 1;
+    submitInfo.pCommandBuffers = &commandBuffer;
+    
+    VkResult result = vkQueueSubmit(gContext_SceneCompositor.queue, 1, &submitInfo, targetTexture->renderCompleteFence);
+    if (result != VK_SUCCESS)
+    {
+        fprintf(gContext_SceneCompositor.logFile, "Failed to submit command buffer for Scene1\n");
+        return result;
+    }
+    
+    vkWaitForFences(gContext_SceneCompositor.device, 1, &targetTexture->renderCompleteFence, VK_TRUE, UINT64_MAX);
+    vkResetFences(gContext_SceneCompositor.device, 1, &targetTexture->renderCompleteFence);
+    
+    return VK_SUCCESS;
+}
+
+VkResult RenderScene2Placeholder(OffScreenTexture* targetTexture)
+{
+    VkCommandBufferBeginInfo beginInfo = {};
+    beginInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
+    beginInfo.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+    
+    VkCommandBuffer commandBuffer = targetTexture->commandBuffer;
+    vkBeginCommandBuffer(commandBuffer, &beginInfo);
+    
+    VkRenderPassBeginInfo renderPassInfo = {};
+    renderPassInfo.sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO;
+    renderPassInfo.renderPass = targetTexture->renderPass;
+    renderPassInfo.framebuffer = targetTexture->framebuffer;
+    renderPassInfo.renderArea.offset = {0, 0};
+    renderPassInfo.renderArea.extent = {gContext_SceneCompositor.windowWidth, gContext_SceneCompositor.windowHeight};
+    
+    VkClearValue clearColor = {};
+    clearColor.color = {{0.2f, 0.8f, 0.3f, 1.0f}}; // Green for Scene2
+    
+    renderPassInfo.clearValueCount = 1;
+    renderPassInfo.pClearValues = &clearColor;
+    
+    vkCmdBeginRenderPass(commandBuffer, &renderPassInfo, VK_SUBPASS_CONTENTS_INLINE);
+    vkCmdEndRenderPass(commandBuffer);
+    
+    vkEndCommandBuffer(commandBuffer);
+    
+    VkSubmitInfo submitInfo = {};
+    submitInfo.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
+    submitInfo.commandBufferCount = 1;
+    submitInfo.pCommandBuffers = &commandBuffer;
+    
+    VkResult result = vkQueueSubmit(gContext_SceneCompositor.queue, 1, &submitInfo, targetTexture->renderCompleteFence);
+    if (result != VK_SUCCESS)
+    {
+        fprintf(gContext_SceneCompositor.logFile, "Failed to submit command buffer for Scene2\n");
+        return result;
+    }
+    
     vkWaitForFences(gContext_SceneCompositor.device, 1, &targetTexture->renderCompleteFence, VK_TRUE, UINT64_MAX);
     vkResetFences(gContext_SceneCompositor.device, 1, &targetTexture->renderCompleteFence);
     

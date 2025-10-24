@@ -91,6 +91,7 @@ struct FunctionTable_Scene1
     VkResult (*createSemaphore)(void);
     VkResult (*createFences)(void);
     VkResult (*buildCommandBuffers)(void);
+    VkResult (*RenderToOffScreenTexture)(VkImageView targetImageView, VkFramebuffer targetFramebuffer, VkRenderPass targetRenderPass);
     PFN_vkDebugReportCallbackEXT debugReportCallback;
 };
 

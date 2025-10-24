@@ -5164,3 +5164,118 @@ void InitializeFunctionTable(void)
     gFunctionTable_Scene0.buildCommandBuffers = buildCommandBuffers;
     gFunctionTable_Scene0.debugReportCallback = debugReportCallback;
 }
+
+VkResult RenderToOffScreenTexture(VkImageView targetImageView, VkFramebuffer targetFramebuffer, VkRenderPass targetRenderPass)
+{
+    VkResult result = VK_SUCCESS;
+    
+    // Check if scene is initialized
+    if (gCtx_Scene0.bInitialized == FALSE)
+    {
+        fprintf(gCtx_Scene0.gpFile, "RenderToOffScreenTexture() --> Scene0 not initialized\n");
+        return VK_FALSE;
+    }
+    
+    // Create command buffer for off-screen rendering
+    VkCommandBufferAllocateInfo allocInfo = {};
+    allocInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
+    allocInfo.commandPool = gCtx_Scene0.vkCommandPool;
+    allocInfo.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
+    allocInfo.commandBufferCount = 1;
+    
+    VkCommandBuffer commandBuffer;
+    result = vkAllocateCommandBuffers(gCtx_Scene0.vkDevice, &allocInfo, &commandBuffer);
+    if (result != VK_SUCCESS)
+    {
+        fprintf(gCtx_Scene0.gpFile, "RenderToOffScreenTexture() --> Failed to allocate command buffer\n");
+        return result;
+    }
+    
+    // Begin command buffer
+    VkCommandBufferBeginInfo beginInfo = {};
+    beginInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
+    beginInfo.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+    
+    result = vkBeginCommandBuffer(commandBuffer, &beginInfo);
+    if (result != VK_SUCCESS)
+    {
+        fprintf(gCtx_Scene0.gpFile, "RenderToOffScreenTexture() --> Failed to begin command buffer\n");
+        return result;
+    }
+    
+    // Begin render pass
+    VkRenderPassBeginInfo renderPassInfo = {};
+    renderPassInfo.sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO;
+    renderPassInfo.renderPass = targetRenderPass;
+    renderPassInfo.framebuffer = targetFramebuffer;
+    renderPassInfo.renderArea.offset = {0, 0};
+    renderPassInfo.renderArea.extent = {gCtx_Scene0.winWidth, gCtx_Scene0.winHeight};
+    
+    VkClearValue clearValues[2];
+    clearValues[0].color = gCtx_Scene0.vkClearColorValue;
+    clearValues[1].depthStencil = gCtx_Scene0.vkClearDepthStencilValue;
+    
+    renderPassInfo.clearValueCount = 2;
+    renderPassInfo.pClearValues = clearValues;
+    
+    vkCmdBeginRenderPass(commandBuffer, &renderPassInfo, VK_SUBPASS_CONTENTS_INLINE);
+    
+    // Bind pipeline
+    vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, gCtx_Scene0.vkPipeline);
+    
+    // Bind vertex buffers
+    VkBuffer vertexBuffers[] = {gCtx_Scene0.vertexData_position.vkBuffer, gCtx_Scene0.vertexData_texcoord.vkBuffer};
+    VkDeviceSize offsets[] = {0, 0};
+    vkCmdBindVertexBuffers(commandBuffer, 0, 2, vertexBuffers, offsets);
+    
+    // Bind descriptor set
+    vkCmdBindDescriptorSet(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, gCtx_Scene0.vkPipelineLayout, 0, 1, &gCtx_Scene0.vkDescriptorSet, 0, nullptr);
+    
+    // Set viewport and scissor
+    VkViewport viewport = {};
+    viewport.x = 0.0f;
+    viewport.y = 0.0f;
+    viewport.width = (float)gCtx_Scene0.winWidth;
+    viewport.height = (float)gCtx_Scene0.winHeight;
+    viewport.minDepth = 0.0f;
+    viewport.maxDepth = 1.0f;
+    vkCmdSetViewport(commandBuffer, 0, 1, &viewport);
+    
+    VkRect2D scissor = {};
+    scissor.offset = {0, 0};
+    scissor.extent = {gCtx_Scene0.winWidth, gCtx_Scene0.winHeight};
+    vkCmdSetScissor(commandBuffer, 0, 1, &scissor);
+    
+    // Draw (assuming we have a quad or triangle)
+    vkCmdDraw(commandBuffer, 6, 1, 0, 0); // Draw full-screen quad
+    
+    vkCmdEndRenderPass(commandBuffer);
+    
+    result = vkEndCommandBuffer(commandBuffer);
+    if (result != VK_SUCCESS)
+    {
+        fprintf(gCtx_Scene0.gpFile, "RenderToOffScreenTexture() --> Failed to end command buffer\n");
+        return result;
+    }
+    
+    // Submit command buffer
+    VkSubmitInfo submitInfo = {};
+    submitInfo.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
+    submitInfo.commandBufferCount = 1;
+    submitInfo.pCommandBuffers = &commandBuffer;
+    
+    result = vkQueueSubmit(gCtx_Scene0.vkQueue, 1, &submitInfo, VK_NULL_HANDLE);
+    if (result != VK_SUCCESS)
+    {
+        fprintf(gCtx_Scene0.gpFile, "RenderToOffScreenTexture() --> Failed to submit command buffer\n");
+        return result;
+    }
+    
+    // Wait for completion
+    vkQueueWaitIdle(gCtx_Scene0.vkQueue);
+    
+    // Clean up command buffer
+    vkFreeCommandBuffers(gCtx_Scene0.vkDevice, gCtx_Scene0.vkCommandPool, 1, &commandBuffer);
+    
+    return VK_SUCCESS;
+}

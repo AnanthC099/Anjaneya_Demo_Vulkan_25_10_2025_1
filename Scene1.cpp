@@ -188,6 +188,16 @@ struct GlobalContext_Scene1
     double upz = 0.0;
     double eyez = 0.0;
     double upy = 1.0;
+    
+    // Off-screen rendering support
+    VkFramebuffer offScreenFramebuffer = VK_NULL_HANDLE;
+    VkRenderPass offScreenRenderPass = VK_NULL_HANDLE;
+    VkCommandBuffer offScreenCommandBuffer = VK_NULL_HANDLE;
+    VkSemaphore offScreenRenderCompleteSemaphore = VK_NULL_HANDLE;
+    VkFence offScreenRenderCompleteFence = VK_NULL_HANDLE;
+    VkImageView offScreenImageView = VK_NULL_HANDLE;
+    VkImage offScreenImage = VK_NULL_HANDLE;
+    VkDeviceMemory offScreenImageMemory = VK_NULL_HANDLE;
 };
 
 GlobalContext_Scene1 g_ctxScene1;
@@ -5967,6 +5977,7 @@ void InitializeFunctionTable_Scene1(void)
     gFunctionTable_Scene1.createSemaphore = createSemaphore;
     gFunctionTable_Scene1.createFences = createFences;
     gFunctionTable_Scene1.buildCommandBuffers = buildCommandBuffers;
+    gFunctionTable_Scene1.RenderToOffScreenTexture = RenderToOffScreenTexture;
     gFunctionTable_Scene1.debugReportCallback = debugReportCallback;
 
     gWin32FunctionTable_Scene1.WndProc = WndProc;
@@ -5976,5 +5987,123 @@ void InitializeFunctionTable_Scene1(void)
     gWin32FunctionTable_Scene1.display = display;
     gWin32FunctionTable_Scene1.update = update;
     gWin32FunctionTable_Scene1.uninitialize = uninitialize;
+}
+
+VkResult RenderToOffScreenTexture(VkImageView targetImageView, VkFramebuffer targetFramebuffer, VkRenderPass targetRenderPass)
+{
+    VkResult result = VK_SUCCESS;
+    
+    // Check if scene is initialized
+    if (g_ctxScene1.bInitialized == FALSE)
+    {
+        fprintf(g_win32WindowCtxScene1.gpFILE, "RenderToOffScreenTexture() --> Scene1 not initialized\n");
+        return VK_FALSE;
+    }
+    
+    // Create command buffer for off-screen rendering
+    VkCommandBufferAllocateInfo allocInfo = {};
+    allocInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
+    allocInfo.commandPool = g_ctxScene1.vkCommandPool;
+    allocInfo.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
+    allocInfo.commandBufferCount = 1;
+    
+    VkCommandBuffer commandBuffer;
+    result = vkAllocateCommandBuffers(g_ctxScene1.vkDevice, &allocInfo, &commandBuffer);
+    if (result != VK_SUCCESS)
+    {
+        fprintf(g_win32WindowCtxScene1.gpFILE, "RenderToOffScreenTexture() --> Failed to allocate command buffer\n");
+        return result;
+    }
+    
+    // Begin command buffer
+    VkCommandBufferBeginInfo beginInfo = {};
+    beginInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
+    beginInfo.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+    
+    result = vkBeginCommandBuffer(commandBuffer, &beginInfo);
+    if (result != VK_SUCCESS)
+    {
+        fprintf(g_win32WindowCtxScene1.gpFILE, "RenderToOffScreenTexture() --> Failed to begin command buffer\n");
+        return result;
+    }
+    
+    // Begin render pass
+    VkRenderPassBeginInfo renderPassInfo = {};
+    renderPassInfo.sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO;
+    renderPassInfo.renderPass = targetRenderPass;
+    renderPassInfo.framebuffer = targetFramebuffer;
+    renderPassInfo.renderArea.offset = {0, 0};
+    renderPassInfo.renderArea.extent = {800, 600}; // Scene1 window size
+    
+    VkClearValue clearValues[2];
+    clearValues[0].color = g_ctxScene1.vkClearColorValue;
+    clearValues[1].depthStencil = g_ctxScene1.vkClearDepthStencilValue;
+    
+    renderPassInfo.clearValueCount = 2;
+    renderPassInfo.pClearValues = clearValues;
+    
+    vkCmdBeginRenderPass(commandBuffer, &renderPassInfo, VK_SUBPASS_CONTENTS_INLINE);
+    
+    // Bind pipeline (assuming Scene1 has a pipeline)
+    // vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, g_ctxScene1.vkPipeline);
+    
+    // Bind vertex buffers (if Scene1 has vertex buffers)
+    // VkBuffer vertexBuffers[] = {g_ctxScene1.vertexBuffer};
+    // VkDeviceSize offsets[] = {0};
+    // vkCmdBindVertexBuffers(commandBuffer, 0, 1, vertexBuffers, offsets);
+    
+    // Bind descriptor set (if Scene1 has descriptor sets)
+    // vkCmdBindDescriptorSet(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, g_ctxScene1.vkPipelineLayout, 0, 1, &g_ctxScene1.vkDescriptorSet, 0, nullptr);
+    
+    // Set viewport and scissor
+    VkViewport viewport = {};
+    viewport.x = 0.0f;
+    viewport.y = 0.0f;
+    viewport.width = 800.0f;
+    viewport.height = 600.0f;
+    viewport.minDepth = 0.0f;
+    viewport.maxDepth = 1.0f;
+    vkCmdSetViewport(commandBuffer, 0, 1, &viewport);
+    
+    VkRect2D scissor = {};
+    scissor.offset = {0, 0};
+    scissor.extent = {800, 600};
+    vkCmdSetScissor(commandBuffer, 0, 1, &scissor);
+    
+    // Draw Scene1 content (this would need to be implemented based on Scene1's actual rendering)
+    // For now, just clear with a red color to indicate Scene1
+    vkCmdClearColorImage(commandBuffer, targetImageView, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, 
+                        &(VkClearColorValue){{0.8f, 0.2f, 0.3f, 1.0f}}, 1, 
+                        &(VkImageSubresourceRange){VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1});
+    
+    vkCmdEndRenderPass(commandBuffer);
+    
+    result = vkEndCommandBuffer(commandBuffer);
+    if (result != VK_SUCCESS)
+    {
+        fprintf(g_win32WindowCtxScene1.gpFILE, "RenderToOffScreenTexture() --> Failed to end command buffer\n");
+        return result;
+    }
+    
+    // Submit command buffer
+    VkSubmitInfo submitInfo = {};
+    submitInfo.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
+    submitInfo.commandBufferCount = 1;
+    submitInfo.pCommandBuffers = &commandBuffer;
+    
+    result = vkQueueSubmit(g_ctxScene1.vkQueue, 1, &submitInfo, VK_NULL_HANDLE);
+    if (result != VK_SUCCESS)
+    {
+        fprintf(g_win32WindowCtxScene1.gpFILE, "RenderToOffScreenTexture() --> Failed to submit command buffer\n");
+        return result;
+    }
+    
+    // Wait for completion
+    vkQueueWaitIdle(g_ctxScene1.vkQueue);
+    
+    // Clean up command buffer
+    vkFreeCommandBuffers(g_ctxScene1.vkDevice, g_ctxScene1.vkCommandPool, 1, &commandBuffer);
+    
+    return VK_SUCCESS;
 }
 
