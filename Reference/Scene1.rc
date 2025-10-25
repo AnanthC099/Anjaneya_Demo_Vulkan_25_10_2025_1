@@ -1,6 +1,0 @@
-
-#include <windows.h>
-
-#include "Scene1.h"
-
-MYICON ICON Anjaneya.ico 
