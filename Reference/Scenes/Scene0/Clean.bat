@@ -1,1 +1,0 @@
-del *.spv *.bak *.txt *.res *.obj *.exe
