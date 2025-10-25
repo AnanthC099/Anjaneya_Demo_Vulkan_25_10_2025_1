@@ -1,0 +1,5 @@
+#include<windows.h>
+#include "Scene0.h"
+MYICON ICON SSA.ico
+MYAUDIO WAVE Name.wav
+
