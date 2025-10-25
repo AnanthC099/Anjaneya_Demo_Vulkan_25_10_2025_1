@@ -1,0 +1,4 @@
+#include "Scene1.h"
+
+MYICON ICON MyIcon.ico
+MYAUDIO WAVE Name.wav
