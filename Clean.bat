@@ -1,1 +1,1 @@
-del *.exe *.txt *.spv *.bak *.res *.obj
+del Scene0.exe Scene1.exe Scene2.exe SceneCompositor.exe Log.txt Scene0.embed.obj Scene1.embed.obj SceneCompositor.obj SceneCompositor.res SceneCompositor.pdb Shader_Scene0.vert.spv Shader_Scene0.frag.spv Shader_Scene1.vert.spv Shader_Scene1.frag.spv shader_Scene2.vert.spv shader_Scene2.frag.spv composite_fullscreen.vert.spv composite_blend.frag.spv *.txt *.spv *.bak *.res *.obj
