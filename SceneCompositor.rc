@@ -1,3 +1,6 @@
-#include "SceneCompositor.h"
-MYICON ICON SSA.ico
 
+#include <windows.h>
+
+#include "SceneCompositor.h"
+
+MYICON ICON Anjaneya.ico 

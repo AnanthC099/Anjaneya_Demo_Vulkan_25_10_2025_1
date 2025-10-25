@@ -1,85 +1,59 @@
-#version 450
+#version 450 core
+#extension GL_ARB_separate_shader_objects : enable
 
-layout(set = 0, binding = 0) uniform UBO {
-    mat4 modelMatrix;
-    mat4 viewMatrix;
-    mat4 projectionMatrix;
+layout(location = 0) out vec4 FragColor;
 
-    // overlayParams:
-    // x = fade (0..1)
-    // y = screen width  (px)
-    // z = screen height (px)
-    // w = +size fraction of min(screenW,screenH)  (positive => rectangle, NO circle)
-    vec4 overlayParams;
-} ubo;
+layout(location = 0) in vec3 out_transformedNormal;
+layout(location = 1) in vec3 out_lightDirection0;
+layout(location = 2) in vec3 out_viewerVector;
+layout(location = 3) in vec3 out_lightDirection1;
 
-layout(set = 0, binding = 1) uniform samplerCube texCube;   // background
-layout(set = 0, binding = 2) uniform sampler2D   texOverlay; // overlay image
+layout(binding = 0) uniform mvpMatrix {
+        mat4 modelMatrix;
+        mat4 viewMatrix;
+        mat4 projectionMatrix;
 
-layout(location = 0) in  vec3 vDir;    // from vertex shader (skybox dir)
-layout(location = 0) out vec4 outColor;
+        vec4 lightAmbient[2];
+        vec4 lightDiffuse[2];
+        vec4 lightSpecular[2];
+        vec4 lightPosition[2];
 
-// Fraction of the overlay's smaller dimension used as soft edge width.
-// Increase to hide the square boundary more aggressively.
-const float kEdgeFeatherFrac = 0.08;  // 8% of overlay size (try 0.05 .. 0.12)
+        vec4 materialAmbient;
+        vec4 materialDiffuse;
+        vec4 materialSpecular;
+        float materialShininess;
+        uint lKeyIsPressed;
+        vec2 padding;
+} uMVP;
 
-void main()
+void main(void)
 {
-    // Background sample from cubemap
-    vec3 dir = normalize(vDir);
-    vec3 bg  = texture(texCube, dir).rgb;
+        vec3 phong_ads_light = vec3(0.0);
 
-    float fade = clamp(ubo.overlayParams.x, 0.0, 1.0);
-    if (fade <= 0.0) {
-        outColor = vec4(bg, 1.0);
-        return;
-    }
+        if(uMVP.lKeyIsPressed == 1u)
+        {
+                vec3 normalizedNormal = normalize(out_transformedNormal);
+                vec3 normalizedViewerVector = normalize(out_viewerVector);
+                vec3 lightDirections[2] = vec3[2](out_lightDirection0, out_lightDirection1);
 
-    // Screen in pixels (Vulkan: gl_FragCoord origin is top-left)
-    vec2 screen = vec2(max(1.0, ubo.overlayParams.y), max(1.0, ubo.overlayParams.z));
-    vec2 fragPx = gl_FragCoord.xy;
+                for(int i = 0; i < 2; ++i)
+                {
+                        vec3 normalizedLightDirection = normalize(lightDirections[i]);
+                        vec3 reflectionVector = reflect(-normalizedLightDirection, normalizedNormal);
 
-    // Desired overlay size (in pixels), centered on screen, preserving texture aspect
-    float frac    = max(0.001, abs(ubo.overlayParams.w));  // fraction of min(screen.x, screen.y)
-    float targetM = frac * min(screen.x, screen.y);
+                        vec3 ambientLight = vec3(uMVP.lightAmbient[i]) * vec3(uMVP.materialAmbient);
+                        vec3 diffusedLight = vec3(uMVP.lightDiffuse[i]) * vec3(uMVP.materialDiffuse) *
+                                             max(dot(normalizedLightDirection, normalizedNormal), 0.0);
+                        vec3 specularLight = vec3(uMVP.lightSpecular[i]) * vec3(uMVP.materialSpecular) *
+                                             pow(max(dot(reflectionVector, normalizedViewerVector), 0.0), uMVP.materialShininess);
 
-    ivec2 texSizeI = textureSize(texOverlay, 0);
-    vec2  texSize  = vec2(max(1, texSizeI.x), max(1, texSizeI.y));
+                        phong_ads_light += ambientLight + diffusedLight + specularLight;
+                }
+        }
+        else
+        {
+                phong_ads_light = vec3(1.0);
+        }
 
-    // Scale so the image's *smaller* dimension becomes 'targetM', but never exceed screen (contain)
-    float sTarget = targetM / min(texSize.x, texSize.y);
-    float sMax    = min(screen.x / texSize.x, screen.y / texSize.y);
-    float s       = min(sTarget, sMax);
-
-    vec2 sizePx   = texSize * s;
-    vec2 center   = 0.5 * screen;
-    vec2 rectMin  = center - 0.5 * sizePx;     // top-left corner of overlay rect
-    vec2 uv       = (fragPx - rectMin) / sizePx;
-
-    // If your overlay appears upside-down, uncomment the next line:
-    // uv.y = 1.0 - uv.y;
-
-    // Only sample inside the rectangle
-    if (all(greaterThanEqual(uv, vec2(0.0))) && all(lessThanEqual(uv, vec2(1.0)))) {
-        vec4 overlay = texture(texOverlay, uv);
-
-        // ----- Soft-edge feathering (in pixels) -----
-        // Distance in pixels to the nearest rectangle edge
-        float dxPx = min(uv.x, 1.0 - uv.x) * sizePx.x;
-        float dyPx = min(uv.y, 1.0 - uv.y) * sizePx.y;
-        float dPx  = min(dxPx, dyPx);
-
-        // Feather width = fraction of the overlay's smaller dimension
-        float featherPx = max(1.0, kEdgeFeatherFrac * min(sizePx.x, sizePx.y));
-
-        // Edge mask: 0 at the border, 1 when 'featherPx' inside the rect
-        float edgeMask = smoothstep(0.0, featherPx, dPx);
-
-        // Final alpha uses both time fade and edge feather
-        float a = overlay.a * fade * edgeMask;
-
-        outColor = vec4(mix(bg, overlay.rgb, a), 1.0);
-    } else {
-        outColor = vec4(bg, 1.0);
-    }
+        FragColor = vec4(phong_ads_light, 1.0);
 }

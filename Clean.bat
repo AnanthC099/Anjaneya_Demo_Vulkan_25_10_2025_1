@@ -1,0 +1,1 @@
+del Scene0.exe Scene1.exe SceneCompositor.exe Log.txt Scene0.embed.obj Scene1.embed.obj SceneCompositor.obj SceneCompositor.res SceneCompositor.pdb Shader_Scene0.vert.spv Shader_Scene0.frag.spv Shader_Scene1.vert.spv Shader_Scene1.frag.spv composite_fullscreen.vert.spv composite_blend.frag.spv *.txt

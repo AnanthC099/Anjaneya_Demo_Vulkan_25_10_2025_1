@@ -1,29 +1,44 @@
-#version 450
+#version 450 core
+#extension GL_ARB_separate_shader_objects : enable
 
-layout(location = 0) in vec3 inPos; // cube positions
-layout(location = 1) in vec2 inUV;  // present but unused for cubemap
+layout(location = 0) in vec3 vPosition;
+layout(location = 1) in vec3 vNormal;
 
-layout(set = 0, binding = 0) uniform UBO {
-    mat4 modelMatrix;
-    mat4 viewMatrix;
-    mat4 projectionMatrix;
-    vec4 overlayParams;   // x=fade, y=screenW, z=screenH, w=signed size (sign encodes shape)
-} ubo;
+layout(location = 0) out vec3 out_transformedNormal;
+layout(location = 1) out vec3 out_lightDirection0;
+layout(location = 2) out vec3 out_viewerVector;
+layout(location = 3) out vec3 out_lightDirection1;
 
-layout(location = 0) out vec3 vDir;
+layout(binding = 0) uniform mvpMatrix {
+        mat4 modelMatrix;
+        mat4 viewMatrix;
+        mat4 projectionMatrix;
 
-void main()
+        vec4 lightAmbient[2];
+        vec4 lightDiffuse[2];
+        vec4 lightSpecular[2];
+        vec4 lightPosition[2];
+
+        vec4 materialAmbient;
+        vec4 materialDiffuse;
+        vec4 materialSpecular;
+        float materialShininess;
+        vec4 padding;
+} uMVP;
+
+void main(void)
 {
-    // Remove translation (CPU side already zeroes it; this is extra safety)
-    mat4 viewNoT = ubo.viewMatrix;
-    viewNoT[3] = vec4(0.0, 0.0, 0.0, 1.0);
+        mat4 modelViewMatrix = uMVP.viewMatrix * uMVP.modelMatrix;
+        vec4 eyeCoordinates = modelViewMatrix * vec4(vPosition, 1.0);
+        mat3 normalMatrix = mat3(transpose(inverse(modelViewMatrix)));
 
-    // Standard skybox trick: keep the cube at eye by forcing z = w
-    vec4 pos = ubo.projectionMatrix * viewNoT * ubo.modelMatrix * vec4(inPos, 1.0);
-    gl_Position = vec4(pos.xy, pos.w, pos.w);
+        vec4 lightPositionEye0 = uMVP.viewMatrix * uMVP.lightPosition[0];
+        vec4 lightPositionEye1 = uMVP.viewMatrix * uMVP.lightPosition[1];
 
-    // Direction for cubemap sampling in WORLD space:
-    // Since view is a pure rotation, inverse(view) = transpose(view).
-    mat3 RviewInv = transpose(mat3(ubo.viewMatrix));
-    vDir = RviewInv * (mat3(ubo.modelMatrix) * inPos);
+        out_transformedNormal = normalMatrix * vNormal;
+        out_lightDirection0 = vec3(lightPositionEye0 - eyeCoordinates);
+        out_lightDirection1 = vec3(lightPositionEye1 - eyeCoordinates);
+        out_viewerVector = -eyeCoordinates.xyz;
+
+        gl_Position = uMVP.projectionMatrix * eyeCoordinates;
 }
