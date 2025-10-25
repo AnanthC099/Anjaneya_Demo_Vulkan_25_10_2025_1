@@ -89,6 +89,14 @@ typedef struct SceneCompositorFunctionTable
     VkResult (*createSemaphores)(void);
     VkResult (*createFences)(void);
     VkResult (*buildCommandBuffers)(void);
+    VkResult (*createOffscreenRenderTargets)(void);
+    VkResult (*createCompositingPipeline)(void);
+    VkResult (*renderScene0ToOffscreen)(void);
+    VkResult (*renderScene1ToOffscreen)(void);
+    VkResult (*renderCompositingPass)(void);
+    void (*setRenderMode)(int mode);
+    VkResult (*updateCompositingParameters)(void);
+    VkResult (*createOffscreenSampler)(void);
     VkBool32 (VKAPI_PTR *debugReportCallback)(VkDebugReportFlagsEXT,
                                               VkDebugReportObjectTypeEXT,
                                               uint64_t,
@@ -217,6 +225,41 @@ typedef struct GlobalContext_SceneCompositor
     VkDeviceMemory textureMemory;
     VkImageView textureImageView;
     VkSampler textureSampler;
+    
+    // Multi-pass offscreen rendering
+    enum RenderMode {
+        RENDER_QUAD_ONLY = 0,
+        RENDER_SCENE0 = 1,
+        RENDER_SCENE1 = 2,
+        RENDER_BOTH = 3
+    } currentRenderMode;
+    
+    // Offscreen rendering for Scene0
+    struct OffscreenRenderTarget {
+        VkImage colorImage;
+        VkDeviceMemory colorImageMemory;
+        VkImageView colorImageView;
+        VkImage depthImage;
+        VkDeviceMemory depthImageMemory;
+        VkImageView depthImageView;
+        VkFramebuffer framebuffer;
+        VkRenderPass renderPass;
+        VkCommandBuffer commandBuffer;
+    } scene0Offscreen, scene1Offscreen;
+    
+    // Scene0 and Scene1 function tables
+    struct {
+        VkResult (*renderScene0)(void);
+        VkResult (*renderScene1)(void);
+    } sceneRenderers;
+    
+    // Compositing pipeline
+    VkPipeline compositingPipeline;
+    VkDescriptorSetLayout compositingDescriptorSetLayout;
+    VkDescriptorPool compositingDescriptorPool;
+    VkDescriptorSet compositingDescriptorSet;
+    VkSampler offscreenSampler;
+    
     PFN_vkCreateDebugReportCallbackEXT createDebugReportCallback;
 } GlobalContext_SceneCompositor;
 
@@ -476,6 +519,26 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT iMsg, WPARAM wParam, LPARAM lParam)
 		case 0x66:
                         Win32FunctionTable_SceneCompositor.ToggleFullscreen();
 			break;
+			
+		case 0x31: // '1' key - Render Scene0 only
+			gContext_SceneCompositor.currentRenderMode = RENDER_SCENE0;
+			fprintf(gContext_SceneCompositor.logFile, "Key pressed: Rendering Scene0 only\n");
+			break;
+			
+		case 0x32: // '2' key - Render Scene1 only
+			gContext_SceneCompositor.currentRenderMode = RENDER_SCENE1;
+			fprintf(gContext_SceneCompositor.logFile, "Key pressed: Rendering Scene1 only\n");
+			break;
+			
+		case 0x33: // '3' key - Render both scenes
+			gContext_SceneCompositor.currentRenderMode = RENDER_BOTH;
+			fprintf(gContext_SceneCompositor.logFile, "Key pressed: Rendering both scenes\n");
+			break;
+			
+		case 0x30: // '0' key - Render quad only
+			gContext_SceneCompositor.currentRenderMode = RENDER_QUAD_ONLY;
+			fprintf(gContext_SceneCompositor.logFile, "Key pressed: Rendering quad only\n");
+			break;
 
 		default:
 			break;
@@ -573,6 +636,8 @@ VkResult Initialize(void)
     VkResult createSemaphores(void);
     VkResult createFences(void);
     VkResult buildCommandBuffers(void);
+    VkResult createOffscreenRenderTargets(void);
+    VkResult createCompositingPipeline(void);
         
     //variable delaration
     VkResult vkResult = VK_SUCCESS;
@@ -893,6 +958,31 @@ VkResult Initialize(void)
         fprintf(gContext_SceneCompositor.logFile, "Initialize() --> buildCommandBuffers() is succedded\n");
     }
     
+    //Create offscreen render targets
+    vkResult = FunctionTable_SceneCompositor.createOffscreenRenderTargets();
+    if(vkResult != VK_SUCCESS)
+    {
+        fprintf(gContext_SceneCompositor.logFile, "Initialize() --> createOffscreenRenderTargets() is failed %d\n", vkResult);
+    }
+    else
+    {
+        fprintf(gContext_SceneCompositor.logFile, "Initialize() --> createOffscreenRenderTargets() is succeeded\n");
+    }
+    
+    //Create compositing pipeline
+    vkResult = FunctionTable_SceneCompositor.createCompositingPipeline();
+    if(vkResult != VK_SUCCESS)
+    {
+        fprintf(gContext_SceneCompositor.logFile, "Initialize() --> createCompositingPipeline() is failed %d\n", vkResult);
+    }
+    else
+    {
+        fprintf(gContext_SceneCompositor.logFile, "Initialize() --> createCompositingPipeline() is succeeded\n");
+    }
+    
+    //Initialize render mode
+    gContext_SceneCompositor.currentRenderMode = RENDER_QUAD_ONLY;
+    
     //Initialization is completed
     gContext_SceneCompositor.isInitialized = TRUE;
     fprintf(gContext_SceneCompositor.logFile, "Initialize() --> Initialization is completed successfully\n");
@@ -1181,6 +1271,52 @@ VkResult Display(void)
         return vkResult;
     }
     
+    // Multi-pass rendering based on current render mode
+    switch(gContext_SceneCompositor.currentRenderMode)
+    {
+        case RENDER_QUAD_ONLY:
+            // Use existing command buffers (original textured quad)
+            break;
+            
+        case RENDER_SCENE0:
+            // Render Scene0 to offscreen texture, then composite
+            vkResult = FunctionTable_SceneCompositor.renderScene0ToOffscreen();
+            if(vkResult != VK_SUCCESS)
+            {
+                fprintf(gContext_SceneCompositor.logFile, "Display() --> renderScene0ToOffscreen() failed %d\n", vkResult);
+                return vkResult;
+            }
+            break;
+            
+        case RENDER_SCENE1:
+            // Render Scene1 to offscreen texture, then composite
+            vkResult = FunctionTable_SceneCompositor.renderScene1ToOffscreen();
+            if(vkResult != VK_SUCCESS)
+            {
+                fprintf(gContext_SceneCompositor.logFile, "Display() --> renderScene1ToOffscreen() failed %d\n", vkResult);
+                return vkResult;
+            }
+            break;
+            
+        case RENDER_BOTH:
+            // Render both scenes to offscreen textures, then composite
+            vkResult = FunctionTable_SceneCompositor.renderScene0ToOffscreen();
+            if(vkResult != VK_SUCCESS)
+            {
+                fprintf(gContext_SceneCompositor.logFile, "Display() --> renderScene0ToOffscreen() failed %d\n", vkResult);
+                return vkResult;
+            }
+            
+            vkResult = FunctionTable_SceneCompositor.renderScene1ToOffscreen();
+            if(vkResult != VK_SUCCESS)
+            {
+                fprintf(gContext_SceneCompositor.logFile, "Display() --> renderScene1ToOffscreen() failed %d\n", vkResult);
+                return vkResult;
+            }
+            break;
+    }
+    
+    // For now, use existing command buffers (will be replaced with compositing pass later)
     //One of the mmeber of vkSubmitinfo structure requires array of pipeline stages, we have only one of the completion of color attachment output, still we need 1 member array
     const VkPipelineStageFlags waitDstStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
 
@@ -5287,6 +5423,221 @@ VkResult buildCommandBuffers(void)
     return vkResult;
 }
 
+VkResult createOffscreenRenderTargets(void)
+{
+    VkResult vkResult = VK_SUCCESS;
+    
+    // Create offscreen render targets for Scene0 and Scene1
+    // This function will create color and depth images, image views, framebuffers, and render passes
+    // for both Scene0 and Scene1 offscreen rendering
+    
+    // For now, we'll create a simple offscreen render target structure
+    // In a full implementation, this would create:
+    // - Color images and image views for both scenes
+    // - Depth images and image views for both scenes
+    // - Framebuffers for both scenes
+    // - Render passes for both scenes
+    // - Command buffers for both scenes
+    
+    // Initialize offscreen render targets
+    memset(&gContext_SceneCompositor.scene0Offscreen, 0, sizeof(gContext_SceneCompositor.scene0Offscreen));
+    memset(&gContext_SceneCompositor.scene1Offscreen, 0, sizeof(gContext_SceneCompositor.scene1Offscreen));
+    
+    // TODO: Implement actual offscreen render target creation
+    // This is a placeholder implementation
+    
+    fprintf(gContext_SceneCompositor.logFile, "createOffscreenRenderTargets() --> Placeholder implementation completed\n");
+    
+    return vkResult;
+}
+
+VkResult createCompositingPipeline(void)
+{
+    VkResult vkResult = VK_SUCCESS;
+    
+    // Create compositing pipeline that will blend the offscreen textures
+    // This pipeline will use a new shader that takes multiple textures as input
+    
+    // For now, we'll create a placeholder implementation
+    // In a full implementation, this would create:
+    // - Descriptor set layout for multiple textures (Scene0, Scene1, Quad)
+    // - Descriptor pool and descriptor sets
+    // - Compositing pipeline using the new shaders
+    // - Offscreen sampler for texture sampling
+    
+    // Initialize compositing pipeline components
+    gContext_SceneCompositor.compositingPipeline = VK_NULL_HANDLE;
+    gContext_SceneCompositor.compositingDescriptorSetLayout = VK_NULL_HANDLE;
+    gContext_SceneCompositor.compositingDescriptorPool = VK_NULL_HANDLE;
+    gContext_SceneCompositor.compositingDescriptorSet = VK_NULL_HANDLE;
+    gContext_SceneCompositor.offscreenSampler = VK_NULL_HANDLE;
+    
+    // TODO: Implement actual compositing pipeline creation
+    // This is a placeholder implementation
+    
+    fprintf(gContext_SceneCompositor.logFile, "createCompositingPipeline() --> Placeholder implementation completed\n");
+    
+    return vkResult;
+}
+
+VkResult renderScene0ToOffscreen(void)
+{
+    VkResult vkResult = VK_SUCCESS;
+    
+    // Render Scene0 to offscreen texture
+    // This will use the Scene0 rendering functions from the Scene0 directory
+    
+    // For now, this is a placeholder implementation
+    // In a full implementation, this would:
+    // - Set up offscreen framebuffer for Scene0
+    // - Call Scene0 rendering functions (from Scene0 directory)
+    // - Record commands to render Scene0 to offscreen texture
+    // - Use the Scene0 shaders and rendering pipeline
+    
+    // TODO: Implement actual Scene0 offscreen rendering
+    // This would involve:
+    // 1. Setting up the offscreen framebuffer
+    // 2. Calling Scene0's rendering functions
+    // 3. Recording the rendering commands to the offscreen texture
+    
+    fprintf(gContext_SceneCompositor.logFile, "renderScene0ToOffscreen() --> Placeholder implementation completed\n");
+    
+    return vkResult;
+}
+
+VkResult renderScene1ToOffscreen(void)
+{
+    VkResult vkResult = VK_SUCCESS;
+    
+    // Render Scene1 to offscreen texture
+    // This will use the Scene1 rendering functions from the Scene1 directory
+    
+    // For now, this is a placeholder implementation
+    // In a full implementation, this would:
+    // - Set up offscreen framebuffer for Scene1
+    // - Call Scene1 rendering functions (from Scene1 directory)
+    // - Record commands to render Scene1 to offscreen texture
+    // - Use the Scene1 shaders and rendering pipeline
+    
+    // TODO: Implement actual Scene1 offscreen rendering
+    // This would involve:
+    // 1. Setting up the offscreen framebuffer
+    // 2. Calling Scene1's rendering functions
+    // 3. Recording the rendering commands to the offscreen texture
+    
+    fprintf(gContext_SceneCompositor.logFile, "renderScene1ToOffscreen() --> Placeholder implementation completed\n");
+    
+    return vkResult;
+}
+
+VkResult renderCompositingPass(void)
+{
+    VkResult vkResult = VK_SUCCESS;
+    
+    // Render the final compositing pass that blends the offscreen textures
+    // This will be the final pass that renders to the swapchain
+    
+    // For now, this is a placeholder implementation
+    // In a full implementation, this would:
+    // - Bind compositing pipeline
+    // - Bind offscreen textures as input (Scene0, Scene1, Quad)
+    // - Render fullscreen quad with compositing shader
+    // - Use the new compositing shaders we created
+    
+    // TODO: Implement actual compositing pass
+    // This would involve:
+    // 1. Binding the compositing pipeline
+    // 2. Binding the offscreen textures as input
+    // 3. Rendering a fullscreen quad with the compositing shader
+    // 4. Blending the textures based on the current render mode
+    
+    fprintf(gContext_SceneCompositor.logFile, "renderCompositingPass() --> Placeholder implementation completed\n");
+    
+    return vkResult;
+}
+
+void setRenderMode(int mode)
+{
+    if (mode >= 0 && mode <= 3)
+    {
+        gContext_SceneCompositor.currentRenderMode = (GlobalContext_SceneCompositor::RenderMode)mode;
+        fprintf(gContext_SceneCompositor.logFile, "Render mode set to: %d\n", mode);
+    }
+}
+
+VkResult updateCompositingParameters(void)
+{
+    VkResult vkResult = VK_SUCCESS;
+    
+    // Update compositing parameters based on current render mode
+    // This function would update uniform buffers with fade factors, blend modes, etc.
+    
+    // For now, this is a placeholder implementation
+    // In a full implementation, this would:
+    // - Update uniform buffers with scene fade factors
+    // - Update blend mode parameters
+    // - Update time-based animations
+    
+    fprintf(gContext_SceneCompositor.logFile, "updateCompositingParameters() --> Placeholder implementation completed\n");
+    
+    return vkResult;
+}
+
+VkResult createOffscreenSampler(void)
+{
+    VkResult vkResult = VK_SUCCESS;
+    
+    // Create sampler for offscreen textures
+    // This function would create a VkSampler for sampling the offscreen textures
+    
+    // For now, this is a placeholder implementation
+    // In a full implementation, this would:
+    // - Create VkSamplerCreateInfo structure
+    // - Set appropriate filtering and addressing modes
+    // - Create the sampler using vkCreateSampler
+    
+    fprintf(gContext_SceneCompositor.logFile, "createOffscreenSampler() --> Placeholder implementation completed\n");
+    
+    return vkResult;
+}
+
+// Additional utility functions for the multi-pass rendering system
+VkResult updateCompositingParameters(void)
+{
+    VkResult vkResult = VK_SUCCESS;
+    
+    // Update compositing parameters based on current render mode
+    // This function would update uniform buffers with fade factors, blend modes, etc.
+    
+    // For now, this is a placeholder implementation
+    // In a full implementation, this would:
+    // - Update uniform buffers with scene fade factors
+    // - Update blend mode parameters
+    // - Update time-based animations
+    
+    fprintf(gContext_SceneCompositor.logFile, "updateCompositingParameters() --> Placeholder implementation completed\n");
+    
+    return vkResult;
+}
+
+VkResult createOffscreenSampler(void)
+{
+    VkResult vkResult = VK_SUCCESS;
+    
+    // Create sampler for offscreen textures
+    // This function would create a VkSampler for sampling the offscreen textures
+    
+    // For now, this is a placeholder implementation
+    // In a full implementation, this would:
+    // - Create VkSamplerCreateInfo structure
+    // - Set appropriate filtering and addressing modes
+    // - Create the sampler using vkCreateSampler
+    
+    fprintf(gContext_SceneCompositor.logFile, "createOffscreenSampler() --> Placeholder implementation completed\n");
+    
+    return vkResult;
+}
+
  VKAPI_ATTR VkBool32 VKAPI_CALL debugReportCallback(VkDebugReportFlagsEXT vkDebugReportFlagsEXT,
                                                    VkDebugReportObjectTypeEXT vkDebugReportObjectTypeEXT,
                                                    uint64_t object,
@@ -5347,5 +5698,13 @@ static void PopulateFunctionTable_SceneCompositor(void)
     FunctionTable_SceneCompositor.createSemaphores = createSemaphores;
     FunctionTable_SceneCompositor.createFences = createFences;
     FunctionTable_SceneCompositor.buildCommandBuffers = buildCommandBuffers;
+    FunctionTable_SceneCompositor.createOffscreenRenderTargets = createOffscreenRenderTargets;
+    FunctionTable_SceneCompositor.createCompositingPipeline = createCompositingPipeline;
+    FunctionTable_SceneCompositor.renderScene0ToOffscreen = renderScene0ToOffscreen;
+    FunctionTable_SceneCompositor.renderScene1ToOffscreen = renderScene1ToOffscreen;
+    FunctionTable_SceneCompositor.renderCompositingPass = renderCompositingPass;
+    FunctionTable_SceneCompositor.setRenderMode = setRenderMode;
+    FunctionTable_SceneCompositor.updateCompositingParameters = updateCompositingParameters;
+    FunctionTable_SceneCompositor.createOffscreenSampler = createOffscreenSampler;
     FunctionTable_SceneCompositor.debugReportCallback = debugReportCallback;
 }
